@@ -291,7 +291,28 @@ pub async fn handle_udp_session(
     };
 
     // 初始化数据并获取密钥索引
-    let mut data = initial_data;
+    // 拼接 header 和 extra_data
+    let mut data = if let Some(mut d) = initial_data {
+        // 检查并跳过 udp_flag (如果它是明文出现在开头)
+        // 这种情况发生在 CLNC 可能会在隧道建立后再次发送 udp_flag
+        let flag_bytes = config.udp_flag.as_bytes();
+        if d.starts_with(flag_bytes) {
+             info!("Stripping udp_flag from initial UDP data");
+             d.drain(0..flag_bytes.len());
+        }
+        
+        // 还要检查是否以 "httpUDP" 开头（CLNC 硬编码可能）
+        if d.starts_with(b"httpUDP") {
+             info!("Stripping 'httpUDP' from initial UDP data");
+             d.drain(0..7);
+        }
+        
+        Some(d)
+    } else {
+        None
+    };
+
+    // Initialize data and get the initial password index
     let initial_password_index = if let Some(ref mut d) = data {
         match init_udp_data(d, &password) {
             Ok(idx) => idx,
