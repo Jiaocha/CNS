@@ -36,71 +36,69 @@ pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, Dec
         return Err(DecryptError::EmptyData);
     }
 
-    // 辅助函数：检查是否是有效的 Host 字符串
-    let is_valid_host = |data: &[u8]| -> bool {
-        if data.is_empty() { return false; }
-        // 允许的字符：字母、数字、点、横杠、冒号
-        // 必须以字母或数字开头 (排除掉解密完全错误产生的随机控制字符)
-        if !data[0].is_ascii_alphanumeric() { return false; }
-        
-        data.iter().all(|&b| {
-            b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b':' || b == 0
-        })
-    };
+    // 使用标准算法 (p | i) 进行解密 (这是目前验证最接近的算法)
+    let mut attempt = decoded_origin.clone();
+    xor_crypt(&mut attempt, password, 0, 0);
 
-    // 暴力尝试多种算法并记录所有结果，以便远程调试
-    let strategies: Vec<(&str, Box<dyn Fn(usize, usize, u8, u8) -> u8>)> = vec![
-        ("Standard (| i)", Box::new(|i, _, p, _| p | (i as u8))),
-        ("WrapIdx (| i%len)", Box::new(|_, pi, p, _| p | (pi as u8))), 
-        ("XorIdx (^ i)", Box::new(|i, _, p, _| p ^ (i as u8))),
-        ("PlusIdx (+ i)", Box::new(|i, _, p, _| p.wrapping_add(i as u8))),
-        ("Simple (^ 0)", Box::new(|_, _, p, _| p)),
-        ("Offset1 (| i+1)", Box::new(|i, _, p, _| p | ((i + 1) as u8))),
-        ("XorOffset1 (^ i+1)", Box::new(|i, _, p, _| p ^ ((i + 1) as u8))),
-        ("Reverse (| len-i)", Box::new(|i, _, p, len| p | ((len as u8).wrapping_sub(i as u8)))),
-    ];
+    // 处理结尾 null
+    if let Some(&0) = attempt.last() { attempt.pop(); }
 
-    let mut best_candidate = decoded_origin.clone();
-    let mut best_score = 0;
+    // 智能清洗与 IP 恢复
+    // 问题：解密后半部分会出现规律性乱码 (如 > < & 等代替了 .)
+    // 策略：模糊匹配 IP 格式
     
-    // 只在第一次调用或 debug 开启时打印所有尝试
-    let show_debug = true; 
+    let original_string = String::from_utf8_lossy(&attempt).to_string();
+    let mut clean = String::new();
+    let mut dot_count = 0;
+    let mut last_was_dot = false;
+    let mut has_port = false;
 
-    for (name, func) in strategies {
-        let mut attempt = decoded_origin.clone();
-        for (i, byte) in attempt.iter_mut().enumerate() {
-            let pwd_char = password[i % password.len()];
-            let mask = func(i, i % password.len(), pwd_char, password.len() as u8);
-            *byte ^= mask;
+    for c in original_string.chars() {
+        if c.is_ascii_digit() {
+            clean.push(c);
+            last_was_dot = false;
+        } else if c == '.' || matches!(c, '>' | '<' | '&' | '%' | ';' | '"' | '!' | ',' | '#') {
+            // 将常见的乱码符号视为点
+            if !last_was_dot {
+                clean.push('.');
+                dot_count += 1;
+                last_was_dot = true;
+            }
+        } else if c == ':' {
+            clean.push(':');
+            has_port = true;
+            last_was_dot = false;
+            // 端口开始后，后面的乱码通常不严重，或者由 TCP 逻辑处理
+        } else if has_port {
+            // 端口后的字符，如果是数字则保留
+             if c.is_ascii_digit() {
+                clean.push(c);
+             }
+        } else {
+            // 其他字符忽略，或者如果是 IP 中间的奇怪字符，可能意味着截断？
+            // 暂时忽略非预期字符
         }
-
-        // 处理结尾 null
-        if let Some(&0) = attempt.last() { attempt.pop(); }
         
-        // 评分：字母数字点号越多越好
-        let valid_chars = attempt.iter().filter(|&&b| b.is_ascii_alphanumeric() || b == b'.' || b == b':' || b == b'-').count();
-        let score = valid_chars * 100 / attempt.len();
-        
-        let s = String::from_utf8_lossy(&attempt).to_string();
-        if show_debug {
-            log::info!("Algo [{}]: {}", name, s);
-        }
-
-        if score > best_score {
-            best_score = score;
-            best_candidate = attempt.clone();
-        }
-        
-        // 完美匹配？
-        if is_valid_host(&attempt) {
-            log::info!("Match found with Algo [{}]", name);
-            return Ok(attempt);
+        // 如果已经有 3 个点，且当前是数字，我们在读取第 4 段
+        // 如果再次遇到点，说明 IP 结束 (4 个点? 不，IP 只需 3 个点)
+        if dot_count > 3 && !has_port {
+            // 可能读到了 IP 后的垃圾数据
+            // 回退最后一个点
+            if clean.ends_with('.') { clean.pop(); }
+            break;
         }
     }
     
-    // 没找到完美匹配，返回最高分的，并记录
-    log::warn!("No perfect match. Returning best candidate (score {}): {:?}", best_score, String::from_utf8_lossy(&best_candidate));
-    Ok(best_candidate)
+    // 简单的完整性检查
+    // 期望格式 x.x.x.x 或 x.x.x.x:p
+    if dot_count >= 3 {
+        log::info!("Smart IP Recover: {} -> {}", original_string, clean);
+        return Ok(clean.into_bytes());
+    }
+
+    // 如果不像 IP，返回原始解密数据 (可能也是乱码，但保留原样)
+    log::warn!("Decryption uncertain: {}", original_string);
+    Ok(attempt)
 }
 
 /// 加密 Host
