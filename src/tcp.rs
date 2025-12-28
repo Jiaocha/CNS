@@ -35,6 +35,21 @@ pub fn get_proxy_host(header: &[u8], proxy_key: &str, password: &[u8]) -> Option
     // 如果有密码，需要解密
     if !password.is_empty() {
         info!("Host bytes (hex): {:02X?}", host_bytes);
+        
+        // 调试：打印预期的解密过程
+        let mut debug_data = host_bytes.to_vec();
+        let mut pwd_idx = 0;
+        let mut debug_log = String::new();
+        for (i, b) in debug_data.iter().enumerate() {
+            let mask = password[pwd_idx] | (pwd_idx as u8);
+            let decrypted = b ^ mask;
+            debug_log.push_str(&format!("[{}: b={:02X} p={:02X} idx={} m={:02X} -> {:02X}] ", 
+                i, b, password[pwd_idx], pwd_idx, mask, decrypted));
+            pwd_idx += 1;
+            if pwd_idx == password.len() { pwd_idx = 0; }
+        }
+        info!("Decrypt trace: {}", debug_log);
+
         match decrypt_host(host_bytes, password) {
             Ok(decrypted) => {
                 info!("Decrypted host: {:?}", String::from_utf8_lossy(&decrypted));
