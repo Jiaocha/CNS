@@ -12,9 +12,9 @@ pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize) ->
     }
 
     for byte in data.iter_mut() {
-        // Go 版本: data[dataSub] ^= CuteBi_XorCrypt_password[passwordSub] | byte(passwordSub)
-        // 注意：这里使用的是 password_index，不是数据索引
-        *byte ^= password[password_index] | (password_index as u8);
+        // 简单 XOR：只使用 password[idx]，不加任何掩码修改
+        // 测试 ZJL 修改版是否使用了更简单的加密方式
+        *byte ^= password[password_index];
         password_index += 1;
         if password_index == password.len() {
             password_index = 0;
