@@ -48,74 +48,71 @@ pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, Dec
         })
     };
 
-    // 算法 1: 标准流式索引 (UDP 验证通过的算法)
-    // byte ^= password[idx] | (stream_offset + i)
-    {
+    // 暴力尝试多种算法并记录所有结果，以便远程调试
+    let strategies: Vec<(&str, Box<dyn Fn(usize, usize, u8, u8) -> u8>)> = vec![
+        ("Standard (| i)", Box::new(|i, _, p, _| p | (i as u8))),
+        ("WrapIdx (| i%len)", Box::new(|_, pi, p, _| p | (pi as u8))), 
+        ("XorIdx (^ i)", Box::new(|i, _, p, _| p ^ (i as u8))),
+        ("PlusIdx (+ i)", Box::new(|i, _, p, _| p.wrapping_add(i as u8))),
+        ("Simple (^ 0)", Box::new(|_, _, p, _| p)),
+        ("Offset1 (| i+1)", Box::new(|i, _, p, _| p | ((i + 1) as u8))),
+        ("XorOffset1 (^ i+1)", Box::new(|i, _, p, _| p ^ ((i + 1) as u8))),
+        ("Reverse (| len-i)", Box::new(|i, _, p, len| p | ((len as u8).wrapping_sub(i as u8)))),
+    ];
+
+    let mut best_candidate = decoded_origin.clone();
+    let mut best_score = 0;
+    
+    // 只在第一次调用或 debug 开启时打印所有尝试
+    let show_debug = true; 
+
+    for (name, func) in strategies {
         let mut attempt = decoded_origin.clone();
-        xor_crypt(&mut attempt, password, 0, 0);
-        
-        // 处理 null 结尾
+        for (i, byte) in attempt.iter_mut().enumerate() {
+            let pwd_char = password[i % password.len()];
+            let mask = func(i, i % password.len(), pwd_char, password.len() as u8);
+            *byte ^= mask;
+        }
+
+        // 处理结尾 null
         if let Some(&0) = attempt.last() { attempt.pop(); }
         
-        if is_valid_host(&attempt) {
-            // log::info!("Decrypt host strategy: Stream Index (Standard)");
-            return Ok(attempt);
+        // 评分：字母数字点号越多越好
+        let valid_chars = attempt.iter().filter(|&&b| b.is_ascii_alphanumeric() || b == b'.' || b == b':' || b == b'-').count();
+        let score = valid_chars * 100 / attempt.len();
+        
+        let s = String::from_utf8_lossy(&attempt).to_string();
+        if show_debug {
+            log::info!("Algo [{}]: {}", name, s);
         }
-    }
 
-    // 算法 2: 简单 XOR
-    // byte ^= password[idx]
-    {
-        let mut attempt = decoded_origin.clone();
-        let mut pwd_idx = 0;
-        for byte in attempt.iter_mut() {
-            *byte ^= password[pwd_idx];
-            pwd_idx = (pwd_idx + 1) % password.len();
+        if score > best_score {
+            best_score = score;
+            best_candidate = attempt.clone();
         }
         
-        // 处理 null 结尾
-        if let Some(&0) = attempt.last() { attempt.pop(); }
-
+        // 完美匹配？
         if is_valid_host(&attempt) {
-            log::info!("Decrypt host strategy: Simple XOR");
-            return Ok(attempt);
-        }
-    }
-
-    // 算法 3: 这里的 mask 使用 password_index (即 0..len-1)
-    // byte ^= password[idx] | idx
-    {
-        let mut attempt = decoded_origin.clone();
-        let mut pwd_idx = 0;
-        for byte in attempt.iter_mut() {
-            *byte ^= password[pwd_idx] | (pwd_idx as u8);
-            pwd_idx = (pwd_idx + 1) % password.len();
-        }
-
-        // 处理 null 结尾
-        if let Some(&0) = attempt.last() { attempt.pop(); }
-
-        if is_valid_host(&attempt) {
-            log::info!("Decrypt host strategy: PwdIdx Mask");
+            log::info!("Match found with Algo [{}]", name);
             return Ok(attempt);
         }
     }
     
-    // 如果都失败，回退到算法 1 (Stream Index)，并依靠外部的模糊修复 (Sanitize)
-    let mut final_attempt = decoded_origin;
-    xor_crypt(&mut final_attempt, password, 0, 0);
-    if let Some(&0) = final_attempt.last() { final_attempt.pop(); }
-    
-    Ok(final_attempt)
+    // 没找到完美匹配，返回最高分的，并记录
+    log::warn!("No perfect match. Returning best candidate (score {}): {:?}", best_score, String::from_utf8_lossy(&best_candidate));
+    Ok(best_candidate)
 }
 
 /// 加密 Host
 /// 
 /// XOR 加密后进行 Base64 编码
+/// 目前使用标准流式索引算法 (Algo 1)
 pub fn encrypt_host(host: &[u8], password: &[u8]) -> String {
     let mut data = host.to_vec();
     data.push(0); // 添加结尾的 null 字节
 
+    // 使用标准算法: byte ^= password[idx] | (i as u8)
+    // 对应 xor_crypt(..., 0, 0)
     xor_crypt(&mut data, password, 0, 0);
     STANDARD.encode(&data)
 }

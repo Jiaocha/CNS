@@ -17,12 +17,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: cns.exe
-            asset_name: cns-windows-x64.exe
-
           # Linux AMD64 (musl 静态链接，兼容性更好)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
@@ -55,18 +49,6 @@ jobs:
             artifact_name: cns
             asset_name: cns-linux-armv7
             cross: true
-
-          # macOS Intel
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: cns
-            asset_name: cns-macos-x64
-
-          # macOS Apple Silicon
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: cns
-            asset_name: cns-macos-arm64
 
     runs-on: ${{ matrix.os }}
 
