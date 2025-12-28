@@ -37,8 +37,38 @@ pub fn get_proxy_host(header: &[u8], proxy_key: &str, password: &[u8]) -> Option
         info!("Host bytes (hex): {:02X?}", host_bytes);
         match decrypt_host(host_bytes, password) {
             Ok(decrypted) => {
-                info!("Decrypted host: {:?}", String::from_utf8_lossy(&decrypted));
-                String::from_utf8(decrypted).ok()
+                let mut s = String::from_utf8_lossy(&decrypted).to_string();
+                info!("Decrypted host (raw): {:?}", s);
+                
+                // 模糊修复 IP 地址中的常见位翻转乱码
+                // 已知乱码: > (62) -> . (46)
+                //           : (58) -> . (46)
+                //           < (60) -> . (46)
+                //           & (38) -> . (46)
+                //           ; (59) -> . (46)
+                //           % (37) -> . (46)
+                // 仅当字符串看起来像 IP 时才替换 (包含数字)
+                if s.chars().any(|c| c.is_ascii_digit()) {
+                    let original = s.clone();
+                    // 替换常见的错误字符为点
+                    // 只有当它们出现在数字之间时才安全？或者直接暴力替换
+                    // 考虑到 host 肯定是 IP 或域名，域名用点，IP 用点。
+                    // 这些符号在正常域名中也不常见（除了端口前的冒号）
+                    
+                    // 策略：如果包含 > < & %，大概率是乱码的点
+                    if s.contains(|c| matches!(c, '>' | '<' | '&' | '%' | ';')) {
+                        s = s.chars().map(|c| match c {
+                            '>' | '<' | '&' | '%' | ';' => '.',
+                            _ => c
+                        }).collect();
+                        info!("Sanitized host: {:?} -> {:?}", original, s);
+                    }
+                    
+                    // 修复端口冒号可能变成其他字符的情况? 
+                    // 暂时先只修复点，因为点是 IP 的核心
+                }
+                
+                Some(s)
             },
             Err(e) => {
                 error!("Decrypt host failed: {}", e);

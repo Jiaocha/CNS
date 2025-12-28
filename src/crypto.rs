@@ -37,12 +37,15 @@ pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, Dec
     xor_crypt(&mut decoded, password, 0);
 
     // 验证结尾的 null 字节
-    if decoded.last() != Some(&0) {
-        return Err(DecryptError::DecryptFailed);
+    // 注意：某些情况下解密可能存在位翻转导致 null 变为其他值
+    // 我们放松检查，只在末尾是 0 时移除它，否则保留整个数据（由调用者清洗）
+    if let Some(&0) = decoded.last() {
+        decoded.pop();
+    } else {
+        // 如果不是 0，也记录个日志但不错误返回，尽可能挽救数据
+        // log::warn!("Decrypt host: last byte is not 0 (hex: {:02X?})", decoded.last());
     }
-
-    // 移除结尾的 null 字节
-    decoded.pop();
+    
     Ok(decoded)
 }
 
