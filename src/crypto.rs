@@ -30,27 +30,83 @@ pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, st
 /// Base64 解码后进行 XOR 解密，验证结尾的 null 字节
 pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, DecryptError> {
     // Base64 解码
-    let mut decoded = STANDARD.decode(encoded_host).map_err(|_| DecryptError::Base64Error)?;
+    let decoded_origin = STANDARD.decode(encoded_host).map_err(|_| DecryptError::Base64Error)?;
 
-    if decoded.is_empty() {
+    if decoded_origin.is_empty() {
         return Err(DecryptError::EmptyData);
     }
 
-    // XOR 解密
-    // Host 解密时，stream_offset 必须为 0，因为它是整个流的开始
-    xor_crypt(&mut decoded, password, 0, 0);
+    // 辅助函数：检查是否是有效的 Host 字符串
+    let is_valid_host = |data: &[u8]| -> bool {
+        if data.is_empty() { return false; }
+        // 允许的字符：字母、数字、点、横杠、冒号
+        // 必须以字母或数字开头 (排除掉解密完全错误产生的随机控制字符)
+        if !data[0].is_ascii_alphanumeric() { return false; }
+        
+        data.iter().all(|&b| {
+            b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b':' || b == 0
+        })
+    };
 
-    // 验证结尾的 null 字节
-    // 注意：某些情况下解密可能存在位翻转导致 null 变为其他值
-    // 我们放松检查，只在末尾是 0 时移除它，否则保留整个数据（由调用者清洗）
-    if let Some(&0) = decoded.last() {
-        decoded.pop();
-    } else {
-        // 如果不是 0，也记录个日志但不错误返回，尽可能挽救数据
-        // log::warn!("Decrypt host: last byte is not 0 (hex: {:02X?})", decoded.last());
+    // 算法 1: 标准流式索引 (UDP 验证通过的算法)
+    // byte ^= password[idx] | (stream_offset + i)
+    {
+        let mut attempt = decoded_origin.clone();
+        xor_crypt(&mut attempt, password, 0, 0);
+        
+        // 处理 null 结尾
+        if let Some(&0) = attempt.last() { attempt.pop(); }
+        
+        if is_valid_host(&attempt) {
+            // log::info!("Decrypt host strategy: Stream Index (Standard)");
+            return Ok(attempt);
+        }
+    }
+
+    // 算法 2: 简单 XOR
+    // byte ^= password[idx]
+    {
+        let mut attempt = decoded_origin.clone();
+        let mut pwd_idx = 0;
+        for byte in attempt.iter_mut() {
+            *byte ^= password[pwd_idx];
+            pwd_idx = (pwd_idx + 1) % password.len();
+        }
+        
+        // 处理 null 结尾
+        if let Some(&0) = attempt.last() { attempt.pop(); }
+
+        if is_valid_host(&attempt) {
+            log::info!("Decrypt host strategy: Simple XOR");
+            return Ok(attempt);
+        }
+    }
+
+    // 算法 3: 这里的 mask 使用 password_index (即 0..len-1)
+    // byte ^= password[idx] | idx
+    {
+        let mut attempt = decoded_origin.clone();
+        let mut pwd_idx = 0;
+        for byte in attempt.iter_mut() {
+            *byte ^= password[pwd_idx] | (pwd_idx as u8);
+            pwd_idx = (pwd_idx + 1) % password.len();
+        }
+
+        // 处理 null 结尾
+        if let Some(&0) = attempt.last() { attempt.pop(); }
+
+        if is_valid_host(&attempt) {
+            log::info!("Decrypt host strategy: PwdIdx Mask");
+            return Ok(attempt);
+        }
     }
     
-    Ok(decoded)
+    // 如果都失败，回退到算法 1 (Stream Index)，并依靠外部的模糊修复 (Sanitize)
+    let mut final_attempt = decoded_origin;
+    xor_crypt(&mut final_attempt, password, 0, 0);
+    if let Some(&0) = final_attempt.last() { final_attempt.pop(); }
+    
+    Ok(final_attempt)
 }
 
 /// 加密 Host
