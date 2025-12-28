@@ -293,18 +293,34 @@ pub async fn handle_udp_session(
     // 初始化数据并获取密钥索引
     // 拼接 header 和 extra_data
     let mut data = if let Some(mut d) = initial_data {
-        // 检查并跳过 udp_flag (如果它是明文出现在开头)
-        // 这种情况发生在 CLNC 可能会在隧道建立后再次发送 udp_flag
+        // 检查是否包含 udp_flag 或 "httpUDP"
+        // CLNC 可能发送类似 "httpUDP: ... \r\n\r\n" 的握手头
         let flag_bytes = config.udp_flag.as_bytes();
-        if d.starts_with(flag_bytes) {
-             info!("Stripping udp_flag from initial UDP data");
-             d.drain(0..flag_bytes.len());
-        }
-        
-        // 还要检查是否以 "httpUDP" 开头（CLNC 硬编码可能）
-        if d.starts_with(b"httpUDP") {
-             info!("Stripping 'httpUDP' from initial UDP data");
-             d.drain(0..7);
+        let has_flag = find_subsequence(&d, flag_bytes).is_some();
+        let has_httpudp = find_subsequence(&d, b"httpUDP").is_some();
+
+        if has_flag || has_httpudp {
+            info!("Found UDP flag in initial data, stripping header...");
+            // 尝试查找双换行符
+            if let Some(pos) = find_subsequence(&d, b"\r\n\r\n") {
+                // 剥离直到 \r\n\r\n (pos + 4)
+                let header_len = pos + 4;
+                if header_len < d.len() {
+                    info!("Stripped {} bytes header from initial UDP data", header_len);
+                    d.drain(0..header_len);
+                } else {
+                    info!("Stripped entire initial UDP data (header only)");
+                    d.clear();
+                }
+            } else {
+                // 没找到换行符，可能是简单的拼接？或者数据不完整？
+                // 按照之前的逻辑，至少剥离 flag
+                if d.starts_with(flag_bytes) {
+                     d.drain(0..flag_bytes.len());
+                } else if d.starts_with(b"httpUDP") {
+                     d.drain(0..7);
+                }
+            }
         }
         
         Some(d)
@@ -338,4 +354,11 @@ pub async fn handle_udp_session(
     }
     
     debug!("handle_udp_session: ended");
+}
+
+/// 查找子序列辅助函数
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
