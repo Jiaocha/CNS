@@ -11,9 +11,11 @@ pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, st
         return password_index;
     }
 
-    for (i, byte) in data.iter_mut().enumerate() {
-        let data_idx = stream_offset.wrapping_add(i);
-        *byte ^= password[password_index] | (data_idx as u8);
+    for (_i, byte) in data.iter_mut().enumerate() {
+        // 使用 password_index 作为掩码 (标准 Go 服务器算法)
+        // 之前尝试使用 data_idx (stream_offset + i) 是为了兼容 clnc 的 host 解密，
+        // 但看来 clnc 的数据流加密可能还是遵循标准算法
+        *byte ^= password[password_index] | (password_index as u8);
         
         password_index += 1;
         if password_index == password.len() {
