@@ -6,10 +6,6 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 /// 
 /// 对数据进行 XOR 加密，返回新的密码索引
 /// 算法: byte ^= password[pwd_idx] | (data_idx as u8)
-/// 
-/// 注意：clnc 客户端使用数据索引 (data_idx) 作为掩码！
-/// 这与原始 Go 服务器代码 (passwordSub) 不同！
-/// clnc 的实际行为是: data[i] ^= password[pwd_idx] | byte(i)
 pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, stream_offset: usize) -> usize {
     if password.is_empty() {
         return password_index;
@@ -17,7 +13,6 @@ pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, st
 
     for (i, byte) in data.iter_mut().enumerate() {
         let data_idx = stream_offset.wrapping_add(i);
-        // 使用数据索引(mod 256)作为掩码的一部分，与 clnc 客户端保持一致
         *byte ^= password[password_index] | (data_idx as u8);
         
         password_index += 1;
@@ -31,12 +26,8 @@ pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, st
 
 /// 解密 Host
 /// 
-/// Base64 解码后尝试多种 XOR 算法解密，自动选择能解密出有效主机名的算法
-/// 
-/// 支持的算法:
-/// 1. 原始 Go 服务器算法: byte ^= password[pwd_idx] | pwd_idx
-/// 2. clnc 客户端算法: byte ^= password[pwd_idx] | data_idx  
-/// 3. 纯 XOR 算法: byte ^= password[pwd_idx]
+/// Base64 解码后尝试多种 XOR 算法解密
+/// 使用评分系统选择最佳结果
 pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, DecryptError> {
     // Base64 解码
     let decoded = STANDARD.decode(encoded_host).map_err(|_| DecryptError::Base64Error)?;
@@ -45,37 +36,83 @@ pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, Dec
         return Err(DecryptError::EmptyData);
     }
 
-    // 定义多种解密算法
-    let algorithms: [(&str, fn(&mut [u8], &[u8])); 3] = [
-        ("pwd_idx", decrypt_algo_pwd_idx),
-        ("data_idx", decrypt_algo_data_idx),
-        ("pure_xor", decrypt_algo_pure_xor),
-    ];
-    
-    // 尝试每种算法
-    for (algo_name, algo_fn) in &algorithms {
+    // 空密码时直接返回解码后的数据
+    if password.is_empty() {
+        log::warn!("Empty password, returning decoded data as-is");
+        let mut result = decoded;
+        if result.last() == Some(&0) {
+            result.pop();
+        }
+        return Ok(result);
+    }
+
+    // 尝试多种算法，选择评分最高的结果
+    let mut best_result: Option<(Vec<u8>, i32, &str)> = None;
+
+    // 算法 1: byte ^= password[pwd_idx] | pwd_idx (原始 Go 服务器)
+    {
         let mut attempt = decoded.clone();
-        algo_fn(&mut attempt, password);
-        
-        // 验证结尾 null 字节
-        if attempt.last() == Some(&0) {
-            attempt.pop(); // 移除 null
-            
-            // 验证是否是有效的主机名（IP 或域名格式）
-            if is_valid_host(&attempt) {
-                log::debug!("Decrypted host using {}: {:?}", algo_name, String::from_utf8_lossy(&attempt));
-                return Ok(attempt);
-            }
+        decrypt_with_pwd_idx(&mut attempt, password);
+        let score = score_host_result(&attempt);
+        if score > best_result.as_ref().map(|(_, s, _)| *s).unwrap_or(-1) {
+            best_result = Some((attempt, score, "pwd_idx"));
         }
     }
-    
-    // 所有算法都失败，记录调试信息
-    log::warn!("All decrypt algorithms failed for host: {:02X?}", decoded);
-    Err(DecryptError::DecryptFailed)
+
+    // 算法 2: byte ^= password[pwd_idx] | data_idx
+    {
+        let mut attempt = decoded.clone();
+        decrypt_with_data_idx(&mut attempt, password);
+        let score = score_host_result(&attempt);
+        if score > best_result.as_ref().map(|(_, s, _)| *s).unwrap_or(-1) {
+            best_result = Some((attempt, score, "data_idx"));
+        }
+    }
+
+    // 算法 3: byte ^= password[pwd_idx] (纯 XOR)
+    {
+        let mut attempt = decoded.clone();
+        decrypt_with_pure_xor(&mut attempt, password);
+        let score = score_host_result(&attempt);
+        if score > best_result.as_ref().map(|(_, s, _)| *s).unwrap_or(-1) {
+            best_result = Some((attempt, score, "pure_xor"));
+        }
+    }
+
+    match best_result {
+        Some((mut result, score, algo_name)) => {
+            // 移除结尾 null
+            if result.last() == Some(&0) {
+                result.pop();
+            }
+            
+            let text = String::from_utf8_lossy(&result);
+            
+            // 如果评分太低，记录警告
+            if score < 50 {
+                log::warn!("Low confidence decrypt (score: {}) using {}: {:?}", score, algo_name, text);
+            } else {
+                log::debug!("Decrypted host using {} (score: {}): {:?}", algo_name, score, text);
+            }
+            
+            // 只要评分大于 0 就返回结果
+            if score > 0 {
+                Ok(result)
+            } else {
+                log::warn!("All decrypt algorithms failed for host: {:02X?}", decoded);
+                Err(DecryptError::DecryptFailed)
+            }
+        }
+        None => {
+            log::warn!("No decrypt result for host: {:02X?}", decoded);
+            Err(DecryptError::DecryptFailed)
+        }
+    }
 }
 
-/// 算法 1: byte ^= password[pwd_idx] | pwd_idx (原始 Go 服务器)
-fn decrypt_algo_pwd_idx(data: &mut [u8], password: &[u8]) {
+/// 算法 1: byte ^= password[pwd_idx] | pwd_idx
+fn decrypt_with_pwd_idx(data: &mut [u8], password: &[u8]) {
+    if password.is_empty() { return; }
     let mut pwd_idx = 0;
     for byte in data.iter_mut() {
         *byte ^= password[pwd_idx] | (pwd_idx as u8);
@@ -83,8 +120,9 @@ fn decrypt_algo_pwd_idx(data: &mut [u8], password: &[u8]) {
     }
 }
 
-/// 算法 2: byte ^= password[pwd_idx] | data_idx (clnc 风格)
-fn decrypt_algo_data_idx(data: &mut [u8], password: &[u8]) {
+/// 算法 2: byte ^= password[pwd_idx] | data_idx
+fn decrypt_with_data_idx(data: &mut [u8], password: &[u8]) {
+    if password.is_empty() { return; }
     let mut pwd_idx = 0;
     for (i, byte) in data.iter_mut().enumerate() {
         *byte ^= password[pwd_idx] | (i as u8);
@@ -92,8 +130,9 @@ fn decrypt_algo_data_idx(data: &mut [u8], password: &[u8]) {
     }
 }
 
-/// 算法 3: byte ^= password[pwd_idx] (纯 XOR)
-fn decrypt_algo_pure_xor(data: &mut [u8], password: &[u8]) {
+/// 算法 3: byte ^= password[pwd_idx]
+fn decrypt_with_pure_xor(data: &mut [u8], password: &[u8]) {
+    if password.is_empty() { return; }
     let mut pwd_idx = 0;
     for byte in data.iter_mut() {
         *byte ^= password[pwd_idx];
@@ -101,78 +140,80 @@ fn decrypt_algo_pure_xor(data: &mut [u8], password: &[u8]) {
     }
 }
 
-/// 检查解密后的数据是否是有效的主机名格式
-fn is_valid_host(data: &[u8]) -> bool {
-    // 必须是有效的 UTF-8
-    let s = match std::str::from_utf8(data) {
+/// 评估解密结果的可能性（分数越高越可能是正确结果）
+fn score_host_result(data: &[u8]) -> i32 {
+    let mut score = 0i32;
+    
+    // 检查结尾 null 字节
+    if data.last() == Some(&0) {
+        score += 30;
+    }
+    
+    // 去掉 null 后转为字符串
+    let end = if data.last() == Some(&0) { data.len() - 1 } else { data.len() };
+    let s = match std::str::from_utf8(&data[..end]) {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(_) => return score, // 不是有效 UTF-8，低分
     };
     
-    // 空字符串无效
     if s.is_empty() {
-        return false;
+        return 0;
     }
     
-    // 分离主机名和端口
-    let (host, port_part) = if let Some(colon_pos) = s.rfind(':') {
-        let potential_port = &s[colon_pos + 1..];
-        // 确保冒号后都是数字（端口号）
-        if potential_port.chars().all(|c| c.is_ascii_digit()) && !potential_port.is_empty() {
-            (&s[..colon_pos], Some(potential_port))
-        } else {
-            (s, None)
-        }
-    } else {
-        (s, None)
-    };
+    // 统计有效字符（数字、点、冒号、字母、连字符）
+    let valid_chars = s.chars().filter(|c| {
+        c.is_ascii_digit() || *c == '.' || *c == ':' || c.is_ascii_alphabetic() || *c == '-'
+    }).count();
     
-    // 验证端口在有效范围内
-    if let Some(port_str) = port_part {
-        if let Ok(port) = port_str.parse::<u32>() {
-            if port == 0 || port > 65535 {
-                return false;
+    let valid_ratio = valid_chars as f32 / s.len() as f32;
+    score += (valid_ratio * 50.0) as i32;
+    
+    // 检查是否以数字开头（可能是 IP）
+    if s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        score += 10;
+    }
+    
+    // 检查是否包含点（IP 或域名）
+    let dot_count = s.chars().filter(|c| *c == '.').count();
+    if dot_count >= 1 && dot_count <= 10 {
+        score += 10;
+    }
+    
+    // 检查 IP 格式
+    let colon_pos = s.rfind(':');
+    let host_part = colon_pos.map(|p| &s[..p]).unwrap_or(s);
+    
+    // 验证 IP 格式
+    let parts: Vec<&str> = host_part.split('.').collect();
+    if parts.len() == 4 {
+        let valid_ip_parts = parts.iter().filter(|p| {
+            p.parse::<u16>().map(|n| n <= 255).unwrap_or(false)
+        }).count();
+        score += valid_ip_parts as i32 * 10;
+    }
+    
+    // 检查端口部分
+    if let Some(pos) = colon_pos {
+        let port_str = &s[pos + 1..];
+        if let Ok(port) = port_str.parse::<u16>() {
+            if port > 0 {
+                score += 20;
             }
-        } else {
-            return false;
         }
     }
     
-    // 验证主机名格式
-    // IP 地址: 数字和点
-    let is_ip_like = host.chars().all(|c| c.is_ascii_digit() || c == '.');
-    if is_ip_like {
-        // 验证 IP 格式: 需要正好 3 个点
-        let parts: Vec<&str> = host.split('.').collect();
-        if parts.len() == 4 {
-            // 验证每个部分是 0-255 的数字
-            return parts.iter().all(|p| {
-                if p.is_empty() { return false; }
-                if let Ok(n) = p.parse::<u16>() {
-                    n <= 255
-                } else {
-                    false
-                }
-            });
-        }
-        return false;
-    }
-    
-    // 域名: 字母、数字、点、连字符
-    host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    score
 }
 
 /// 加密 Host
 /// 
 /// XOR 加密后进行 Base64 编码
-/// 目前使用标准流式索引算法 (Algo 1)
 pub fn encrypt_host(host: &[u8], password: &[u8]) -> String {
     let mut data = host.to_vec();
     data.push(0); // 添加结尾的 null 字节
 
-    // 使用标准算法: byte ^= password[idx] | (i as u8)
-    // 对应 xor_crypt(..., 0, 0)
-    xor_crypt(&mut data, password, 0, 0);
+    // 使用 pwd_idx 算法
+    decrypt_with_pwd_idx(&mut data, password);
     STANDARD.encode(&data)
 }
 
@@ -227,5 +268,13 @@ mod tests {
         let decrypted = decrypt_host(encrypted.as_bytes(), password).unwrap();
 
         assert_eq!(decrypted, host);
+    }
+    
+    #[test]
+    fn test_empty_password() {
+        let password = b"";
+        let host = b"test";
+        // 不应该 panic
+        let _ = decrypt_host(host, password);
     }
 }
