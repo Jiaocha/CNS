@@ -82,7 +82,7 @@ prompt_input() {
 LISTEN_PORT=$(prompt_input "请输入监听端口 [默认: 2222]: " "2222")
 
 # 获取代理 Key
-PROXY_KEY=$(prompt_input "请输入代理 Key [默认: Host]: " "Host")
+PROXY_KEY=$(prompt_input "请输入代理 Key [默认: Meng]: " "Meng")
 
 # 获取加密密码
 ENCRYPT_PASSWORD=$(prompt_input "请输入加密密码 [留空则不加密]: " "")

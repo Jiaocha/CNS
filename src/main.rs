@@ -107,7 +107,7 @@ async fn main() {
 
     info!("　/) /)");
     info!("ฅ(՞•ﻌ•՞)ฅ");
-    info!("CuteBi Network Server 0.4.2 (Rust)");
+    info!("CuteBi Network Server 0.5.0 (Rust)");
     info!("Author: CuteBi(Mmmdbybyd)");
     info!("E-mail: supercutename@gmail.com");
     info!("");

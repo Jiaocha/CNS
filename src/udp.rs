@@ -34,9 +34,7 @@ async fn write_to_server(udp_socket: &UdpSocket, data: &[u8]) -> i32 {
         }
         
         // Go 代码: if httpUDP_data[5] == 1
-        // 注意：Go 代码使用的是固定偏移 5，而不是 pkgSub+5
-        // 这可能是 Go 代码的 bug，但 CLNC 客户端可能依赖这个行为
-        // 为了兼容，我们也使用 pkg_sub + 5（更合理的实现）
+        // 注意：Go 代码使用的是固定偏移 5（相对于 pkgSub+2）
         let addr_type = data[pkg_sub + 5];
         
         let (addr, header_len) = if addr_type == 1 {
@@ -85,6 +83,7 @@ async fn write_to_server(udp_socket: &UdpSocket, data: &[u8]) -> i32 {
 }
 
 /// 初始化 UDP 数据（验证加密数据）
+/// 返回 Ok(password_index) 解密数据并返回密钥索引
 fn init_udp_data(data: &mut [u8], password: &[u8]) -> Result<usize, &'static str> {
     if !password.is_empty() && data.len() >= 5 {
         // 解密前5字节进行验证
@@ -98,7 +97,7 @@ fn init_udp_data(data: &mut [u8], password: &[u8]) -> Result<usize, &'static str
             return Err("Is not httpUDP protocol or Decrypt failed");
         }
 
-        // 解密整个数据
+        // 解密整个数据，返回密钥索引
         Ok(xor_crypt(data, password, 0))
     } else {
         Ok(0)
@@ -110,14 +109,16 @@ async fn client_to_server(
     client_read: &mut tokio::io::ReadHalf<TcpStream>,
     udp_socket: &UdpSocket,
     initial_data: Option<Vec<u8>>,
+    initial_password_index: usize,
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
 ) {
     let mut buffer = vec![0u8; 65536];
     let mut payload_len = 0usize;
-    let mut password_index = 0usize;
+    // 从初始化返回的密钥索引开始
+    let mut password_index = initial_password_index;
 
-    // 处理初始数据
+    // 处理初始数据（已经被解密了）
     if let Some(data) = initial_data {
         debug!("client_to_server: processing initial data, len={}", data.len());
         let w_len = write_to_server(udp_socket, &data).await;
@@ -140,7 +141,7 @@ async fn client_to_server(
             Ok(Ok(n)) => {
                 debug!("client_to_server: read {} bytes from client", n);
                 
-                // 解密
+                // 解密（使用当前密钥索引继续）
                 if !password.is_empty() {
                     password_index = xor_crypt(
                         &mut buffer[payload_len..payload_len + n],
@@ -285,14 +286,19 @@ pub async fn handle_udp_session(
         }
     };
 
-    // 初始化数据
+    // 初始化数据并获取密钥索引
     let mut data = initial_data;
-    if let Some(ref mut d) = data {
-        if let Err(e) = init_udp_data(d, &password) {
-            error!("Init UDP session failed: {}", e);
-            return;
+    let initial_password_index = if let Some(ref mut d) = data {
+        match init_udp_data(d, &password) {
+            Ok(idx) => idx,
+            Err(e) => {
+                error!("Init UDP session failed: {}", e);
+                return;
+            }
         }
-    }
+    } else {
+        0
+    };
 
     let (mut client_read, mut client_write) = tokio::io::split(client);
 
@@ -302,7 +308,7 @@ pub async fn handle_udp_session(
 
     // 双向转发
     tokio::select! {
-        _ = client_to_server(&mut client_read, &udp_socket, data, config, password) => {}
+        _ = client_to_server(&mut client_read, &udp_socket, data, initial_password_index, config, password) => {}
         _ = server_to_client(&mut client_write, &udp_socket2, config2, password2) => {}
     }
     

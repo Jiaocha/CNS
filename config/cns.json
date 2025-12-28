@@ -9,7 +9,7 @@
         "0.0.0.0:12224"
     ],
     "//": "设定请求头中获取host的key, 默认Host",
-    "proxy_key": "Host",
+    "proxy_key": "Meng",
     "//": "加密密码, 默认没有密码(普通http_tunnel代理)",
     "encrypt_password": "password",
     "//": "开启tcpDNS转udpDNS, 可稍微加快DNS解析速度, 默认关闭",
