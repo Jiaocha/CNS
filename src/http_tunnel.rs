@@ -72,8 +72,8 @@ fn configure_socket(stream: &TcpStream) {
     // 设置 TCP_NODELAY 禁用 Nagle 算法，减少延迟
     let _ = stream.set_nodelay(true);
 
-    // 尝试设置 TCP keepalive
-    #[cfg(unix)]
+    // 尝试设置 TCP keepalive (Linux only)
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
         let fd = stream.as_raw_fd();
@@ -107,6 +107,34 @@ fn configure_socket(stream: &TcpStream) {
                 libc::TCP_KEEPINTVL,
                 &keepintvl as *const _ as *const libc::c_void,
                 std::mem::size_of_val(&keepintvl) as libc::socklen_t,
+            );
+        }
+    }
+    
+    // macOS 使用不同的常量名
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        
+        unsafe {
+            let optval: libc::c_int = 1;
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            
+            // macOS: TCP_KEEPALIVE 代替 TCP_KEEPIDLE
+            let keepalive: libc::c_int = 60;
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPALIVE,
+                &keepalive as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&keepalive) as libc::socklen_t,
             );
         }
     }
