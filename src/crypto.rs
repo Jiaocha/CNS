@@ -5,14 +5,16 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 /// XOR 加密/解密
 /// 
 /// 对数据进行简单的 XOR 加密，返回密码索引位置
+/// 注意：CLNC 客户端使用数据索引作为掩码，但这里使用纯密码索引
 pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize) -> usize {
     if password.is_empty() {
         return password_index;
     }
 
-    for (i, byte) in data.iter_mut().enumerate() {
-        // CLNC 客户端使用数据索引 (i) 作为掩码，而不是密码索引
-        *byte ^= password[password_index] | (i as u8);
+    for byte in data.iter_mut() {
+        // Go 版本: data[dataSub] ^= CuteBi_XorCrypt_password[passwordSub] | byte(passwordSub)
+        // 注意：这里使用的是 password_index，不是数据索引
+        *byte ^= password[password_index] | (password_index as u8);
         password_index += 1;
         if password_index == password.len() {
             password_index = 0;
