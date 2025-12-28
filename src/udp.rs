@@ -273,6 +273,7 @@ async fn server_to_client(
 }
 
 /// 处理 UDP 会话
+// 处理 UDP 会话
 pub async fn handle_udp_session(
     client: TcpStream,
     initial_data: Option<Vec<u8>>,
@@ -290,50 +291,66 @@ pub async fn handle_udp_session(
         }
     };
 
-    // 初始化数据并获取密钥索引
-    // 拼接 header 和 extra_data
-    let mut data = if let Some(mut d) = initial_data {
-        // 检查是否包含 udp_flag 或 "httpUDP"
-        // CLNC 可能发送类似 "httpUDP: ... \r\n\r\n" 的握手头
-        let flag_bytes = config.udp_flag.as_bytes();
-        let has_flag = find_subsequence(&d, flag_bytes).is_some();
-        let has_httpudp = find_subsequence(&d, b"httpUDP").is_some();
+    let (mut client_read, mut client_write) = tokio::io::split(client);
+    
+    // 1. 完整读取并剥离头部 (直到 \r\n\r\n)
+    let mut buffer = Vec::new();
+    if let Some(d) = initial_data {
+        buffer.extend_from_slice(&d);
+    }
+    
+    let flag_bytes = config.udp_flag.as_bytes();
+    let mut read_buf = [0u8; 4096];
 
-        if has_flag || has_httpudp {
-            info!("Found UDP flag in initial data, stripping header...");
-            // 尝试查找双换行符
-            if let Some(pos) = find_subsequence(&d, b"\r\n\r\n") {
-                // 剥离直到 \r\n\r\n (pos + 4)
+    // 如果缓冲区开头不是 flag，可能是直接的 UDP 包（如果 flag 已经在 http_tunnel 中被部分消耗？）
+    // 但通常 http_tunnel 传递包含 header 的 extra_data
+    // 我们先尝试查找 flag 或 httpUDP，如果找到了，就必须等待直到 \r\n\r\n
+    
+    // 简单的状态机：如果不以 flag 开头，假设没有 header 或 header 已被处理
+    // 但为了鲁棒性，我们检查缓冲区是否以 flag 开头
+    let starts_with_flag = buffer.starts_with(flag_bytes) || buffer.starts_with(b"httpUDP");
+    
+    if starts_with_flag {
+        info!("UDP session starts with flag, waiting for full header...");
+        loop {
+            // 检查是否包含 \r\n\r\n
+            if let Some(pos) = find_subsequence(&buffer, b"\r\n\r\n") {
                 let header_len = pos + 4;
-                if header_len < d.len() {
-                    info!("Stripped {} bytes header from initial UDP data", header_len);
-                    d.drain(0..header_len);
-                } else {
-                    info!("Stripped entire initial UDP data (header only)");
-                    d.clear();
+                info!("Stripped {} bytes header from UDP stream", header_len);
+                buffer.drain(0..header_len);
+                break;
+            }
+            
+            // 如果堆积太多数据还没找到换行，可能是异常，强制中止 header 搜索
+            if buffer.len() > 65536 {
+                error!("UDP header too long, aborting header strip");
+                break; 
+            }
+
+            // 读取更多数据
+            match timeout(std::time::Duration::from_secs(5), client_read.read(&mut read_buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    buffer.extend_from_slice(&read_buf[..n]);
                 }
-            } else {
-                // 没找到换行符，可能是简单的拼接？或者数据不完整？
-                // 按照之前的逻辑，至少剥离 flag
-                if d.starts_with(flag_bytes) {
-                     d.drain(0..flag_bytes.len());
-                } else if d.starts_with(b"httpUDP") {
-                     d.drain(0..7);
+                _ => {
+                    // 读取失败或超时
+                    error!("Timeout or EOF while waiting for UDP header");
+                    break;
                 }
             }
         }
-        
-        Some(d)
     } else {
-        None
-    };
+        // 不以 flag 开头，假设是纯数据
+    }
 
-    // Initialize data and get the initial password index
-    let initial_password_index = if let Some(ref mut d) = data {
-        match init_udp_data(d, &password) {
+    // 2. 初始化 UDP 数据 (验证)
+    // 此时 buffer 应该包含 Encrypted Payload
+    let initial_password_index = if !buffer.is_empty() {
+        match init_udp_data(&mut buffer, &password) {
             Ok(idx) => idx,
             Err(e) => {
                 error!("Init UDP session failed: {}", e);
+                // 如果验证失败，可能是还没收全？但 init_udp_data 只需要 5 字节
                 return;
             }
         }
@@ -341,15 +358,16 @@ pub async fn handle_udp_session(
         0
     };
 
-    let (mut client_read, mut client_write) = tokio::io::split(client);
-
+    // 传入剩余的 buffer 作为 initial_data
+    let initial_payload = if buffer.is_empty() { None } else { Some(buffer) };
+    
     let config2 = config.clone();
     let password2 = password.clone();
     let udp_socket2 = udp_socket.clone();
 
     // 双向转发
     tokio::select! {
-        _ = client_to_server(&mut client_read, &udp_socket, data, initial_password_index, config, password) => {}
+        _ = client_to_server(&mut client_read, &udp_socket, initial_payload, initial_password_index, config, password) => {}
         _ = server_to_client(&mut client_write, &udp_socket2, config2, password2) => {}
     }
     
