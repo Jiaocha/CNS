@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[derive(Parser, Debug)]
 #[command(name = "cns")]
 #[command(author = "CuteBi <supercutename@gmail.com>")]
-#[command(version = "0.4.2")]
+#[command(version = "0.5.0")]
 #[command(about = "CuteBi Network Server - A high-performance network proxy server", long_about = None)]
 struct Args {
     /// JSON 配置文件路径
