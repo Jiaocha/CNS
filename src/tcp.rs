@@ -34,7 +34,7 @@ pub fn get_proxy_host(header: &[u8], proxy_key: &str, password: &[u8]) -> Option
 
     // 如果有密码，需要解密
     if !password.is_empty() {
-        info!("Host bytes (len={}): {:?}", host_bytes.len(), String::from_utf8_lossy(host_bytes));
+        info!("Host bytes (hex): {:02X?}", host_bytes);
         match decrypt_host(host_bytes, password) {
             Ok(decrypted) => {
                 info!("Decrypted host: {:?}", String::from_utf8_lossy(&decrypted));

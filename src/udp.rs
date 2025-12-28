@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::crypto::xor_crypt;
-use log::{error, debug};
+use log::{error, debug, info};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -93,7 +93,11 @@ fn init_udp_data(data: &mut [u8], password: &[u8]) -> Result<usize, &'static str
 
         // 验证协议头: de[2] != 0 || de[3] != 0 || de[4] != 0
         // Go 代码检查 [2], [3], [4] 都为 0
+        // 验证协议头: de[2] != 0 || de[3] != 0 || de[4] != 0
+        // Go 代码检查 [2], [3], [4] 都为 0
         if test_data[2] != 0 || test_data[3] != 0 || test_data[4] != 0 {
+            info!("UDP Verify failed. Raw (hex): {:02X?}", &data[..std::cmp::min(data.len(), 16)]);
+            info!("Decrypted header (hex): {:02X?}", test_data);
             return Err("Is not httpUDP protocol or Decrypt failed");
         }
 

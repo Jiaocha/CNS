@@ -10,9 +10,9 @@ pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize) ->
         return password_index;
     }
 
-    for byte in data.iter_mut() {
-        // 如果只是 data[i] ^= password[index]，则密码 "12" 跟密码 "1212" 没有任何区别
-        *byte ^= password[password_index] | (password_index as u8);
+    for (i, byte) in data.iter_mut().enumerate() {
+        // CLNC 客户端使用数据索引 (i) 作为掩码，而不是密码索引
+        *byte ^= password[password_index] | (i as u8);
         password_index += 1;
         if password_index == password.len() {
             password_index = 0;
