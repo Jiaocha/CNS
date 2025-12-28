@@ -8,6 +8,7 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${GREEN}"
@@ -58,18 +59,93 @@ sudo chmod +x /usr/local/bin/cns
 # 创建配置目录
 sudo mkdir -p /etc/cns
 
-# 创建默认配置（如果不存在）
-if [ ! -f /etc/cns/config.json ]; then
-    sudo tee /etc/cns/config.json > /dev/null << 'EOF'
+echo ""
+echo -e "${CYAN}========== 服务器配置 ==========${NC}"
+echo ""
+
+# 获取监听端口
+read -p "请输入监听端口 [默认: 2222]: " LISTEN_PORT
+LISTEN_PORT=${LISTEN_PORT:-2222}
+
+# 获取代理 Key
+read -p "请输入代理 Key [默认: Host]: " PROXY_KEY
+PROXY_KEY=${PROXY_KEY:-Host}
+
+# 获取加密密码
+read -p "请输入加密密码 [留空则不加密]: " ENCRYPT_PASSWORD
+
+# HTTP DNS
+read -p "是否启用 HTTP DNS? (y/n) [默认: y]: " ENABLE_DNS
+ENABLE_DNS=${ENABLE_DNS:-y}
+if [ "$ENABLE_DNS" = "y" ] || [ "$ENABLE_DNS" = "Y" ]; then
+    ENABLE_HTTP_DNS="true"
+else
+    ENABLE_HTTP_DNS="false"
+fi
+
+# TLS 配置
+read -p "是否启用 TLS? (y/n) [默认: n]: " ENABLE_TLS
+ENABLE_TLS=${ENABLE_TLS:-n}
+
+TLS_CONFIG=""
+if [ "$ENABLE_TLS" = "y" ] || [ "$ENABLE_TLS" = "Y" ]; then
+    read -p "请输入 TLS 监听端口 [默认: 443]: " TLS_PORT
+    TLS_PORT=${TLS_PORT:-443}
+    read -p "请输入证书域名 (用逗号分隔，留空自动生成): " TLS_HOSTS
+    
+    if [ -n "$TLS_HOSTS" ]; then
+        # 转换为 JSON 数组格式
+        TLS_HOSTS_JSON=$(echo "$TLS_HOSTS" | sed 's/,/","/g')
+        TLS_CONFIG=",
+    \"Tls\": {
+        \"listen_addr\": [\"0.0.0.0:$TLS_PORT\"],
+        \"AutoCertHosts\": [\"$TLS_HOSTS_JSON\"]
+    }"
+    else
+        TLS_CONFIG=",
+    \"Tls\": {
+        \"listen_addr\": [\"0.0.0.0:$TLS_PORT\"]
+    }"
+    fi
+fi
+
+# 生成配置文件
+echo ""
+echo -e "${YELLOW}正在生成配置文件...${NC}"
+
+if [ -n "$ENCRYPT_PASSWORD" ]; then
+    ENCRYPT_LINE="\"encrypt_password\": \"$ENCRYPT_PASSWORD\","
+else
+    ENCRYPT_LINE=""
+fi
+
+sudo tee /etc/cns/config.json > /dev/null << EOF
 {
-    "listen_addr": ["0.0.0.0:2222"],
-    "proxy_key": "Host",
-    "Enable_httpDNS": true,
-    "Enable_dns_tcpOverUdp": true
+    "listen_addr": ["0.0.0.0:$LISTEN_PORT"],
+    "proxy_key": "$PROXY_KEY",
+    $ENCRYPT_LINE
+    "Enable_httpDNS": $ENABLE_HTTP_DNS,
+    "Enable_dns_tcpOverUdp": true$TLS_CONFIG
 }
 EOF
-    echo -e "${GREEN}已创建默认配置: /etc/cns/config.json${NC}"
+
+echo -e "${GREEN}配置文件已保存: /etc/cns/config.json${NC}"
+
+# 显示配置
+echo ""
+echo -e "${CYAN}========== 配置信息 ==========${NC}"
+echo -e "监听地址: ${GREEN}0.0.0.0:$LISTEN_PORT${NC}"
+echo -e "代理 Key: ${GREEN}$PROXY_KEY${NC}"
+if [ -n "$ENCRYPT_PASSWORD" ]; then
+    echo -e "加密密码: ${GREEN}$ENCRYPT_PASSWORD${NC}"
+else
+    echo -e "加密密码: ${YELLOW}未设置${NC}"
 fi
+echo -e "HTTP DNS: ${GREEN}$ENABLE_HTTP_DNS${NC}"
+if [ "$ENABLE_TLS" = "y" ] || [ "$ENABLE_TLS" = "Y" ]; then
+    echo -e "TLS 端口: ${GREEN}$TLS_PORT${NC}"
+fi
+echo ""
 
 # 创建 systemd 服务
 sudo tee /etc/systemd/system/cns.service > /dev/null << 'EOF'
@@ -90,18 +166,29 @@ EOF
 # 重载 systemd
 sudo systemctl daemon-reload
 
+# 询问是否启动服务
+read -p "是否立即启动服务? (y/n) [默认: y]: " START_NOW
+START_NOW=${START_NOW:-y}
+
+if [ "$START_NOW" = "y" ] || [ "$START_NOW" = "Y" ]; then
+    sudo systemctl start cns
+    sudo systemctl enable cns
+    echo ""
+    echo -e "${GREEN}✓ 服务已启动并设置开机自启!${NC}"
+else
+    echo ""
+    echo -e "${YELLOW}服务未启动。${NC}"
+fi
+
 echo ""
 echo -e "${GREEN}✓ 安装完成!${NC}"
 echo ""
 echo "使用方法:"
 echo "  sudo systemctl start cns     # 启动服务"
 echo "  sudo systemctl stop cns      # 停止服务"
-echo "  sudo systemctl enable cns    # 开机自启"
+echo "  sudo systemctl restart cns   # 重启服务"
 echo "  sudo systemctl status cns    # 查看状态"
 echo ""
 echo "配置文件: /etc/cns/config.json"
+echo "修改配置后请运行: sudo systemctl restart cns"
 echo ""
-
-# 版本信息
-echo -e "${YELLOW}已安装版本:${NC}"
-/usr/local/bin/cns --help 2>&1 | head -5 || echo -e "${GREEN}CNS 已安装成功${NC}"
