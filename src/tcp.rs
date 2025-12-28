@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::crypto::{decrypt_host, xor_crypt};
 use crate::dns::dns_tcp_over_udp;
-use log::{error, debug};
+use log::{error, debug, info};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::TcpStream;
@@ -34,10 +34,19 @@ pub fn get_proxy_host(header: &[u8], proxy_key: &str, password: &[u8]) -> Option
 
     // 如果有密码，需要解密
     if !password.is_empty() {
+        info!("Host bytes (len={}): {:?}", host_bytes.len(), String::from_utf8_lossy(host_bytes));
         match decrypt_host(host_bytes, password) {
-            Ok(decrypted) => String::from_utf8(decrypted).ok(),
+            Ok(decrypted) => {
+                info!("Decrypted host: {:?}", String::from_utf8_lossy(&decrypted));
+                String::from_utf8(decrypted).ok()
+            },
             Err(e) => {
                 error!("Decrypt host failed: {}", e);
+                // 尝试用空密码解密看看（排除密码错误）
+                // 仅用于调试
+                if let Ok(d) = decrypt_host(host_bytes, &[]) {
+                     info!("Decrypted with empty password: {:?}", String::from_utf8_lossy(&d));
+                }
                 None
             }
         }
