@@ -4,12 +4,15 @@ use crate::config::Config;
 use crate::dns::respond_http_dns;
 use crate::tcp::handle_tcp_session;
 use crate::udp::handle_udp_session;
-use log::{error, info};
+use log::{error, debug, info};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::server::TlsStream;
+
+// 优化：使用更大的接收缓冲区
+const HEADER_BUFFER_SIZE: usize = 16384; // 16KB for headers
 
 /// 检查是否是 HTTP 请求头
 pub fn is_http_header(header: &[u8]) -> bool {
@@ -64,13 +67,61 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// 配置 TCP socket 优化选项
+fn configure_socket(stream: &TcpStream) {
+    // 设置 TCP_NODELAY 禁用 Nagle 算法，减少延迟
+    let _ = stream.set_nodelay(true);
+
+    // 尝试设置 TCP keepalive
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        
+        // 设置 SO_KEEPALIVE
+        unsafe {
+            let optval: libc::c_int = 1;
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            
+            // TCP_KEEPIDLE: 60秒后开始发送 keepalive
+            let keepidle: libc::c_int = 60;
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPIDLE,
+                &keepidle as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&keepidle) as libc::socklen_t,
+            );
+            
+            // TCP_KEEPINTVL: 每30秒发送一次
+            let keepintvl: libc::c_int = 30;
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPINTVL,
+                &keepintvl as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&keepintvl) as libc::socklen_t,
+            );
+        }
+    }
+}
+
 /// 处理隧道连接
 pub async fn handle_tunnel(
     mut client: TcpStream,
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
 ) {
-    let mut buffer = vec![0u8; 8192];
+    // 配置 socket
+    configure_socket(&client);
+    
+    let mut buffer = vec![0u8; HEADER_BUFFER_SIZE];
     let mut payload_len = 0usize;
 
     // 读取请求头
@@ -89,13 +140,19 @@ pub async fn handle_tunnel(
                 {
                     break;
                 }
+                
+                // 防止缓冲区溢出
+                if payload_len >= buffer.len() - 1024 {
+                    error!("Header too large");
+                    return;
+                }
             }
             Ok(Err(e)) => {
-                error!("Read error: {}", e);
+                debug!("Read error: {}", e);
                 return;
             }
             Err(_) => {
-                error!("Read timeout");
+                debug!("Read timeout");
                 return;
             }
         }
@@ -114,14 +171,13 @@ pub async fn handle_tunnel(
             if respond_http_dns(client, &header).await {
                 return;
             }
-            // HTTP DNS 处理失败意味着已经消费了 client，直接返回
             return;
         }
 
         // 发送响应头
         let response = generate_response_header(&header);
         if let Err(e) = client.write_all(response).await {
-            error!("Write response header error: {}", e);
+            debug!("Write response header error: {}", e);
             return;
         }
 
@@ -140,7 +196,7 @@ pub async fn handle_tls_tunnel(
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
 ) {
-    let mut buffer = vec![0u8; 8192];
+    let mut buffer = vec![0u8; HEADER_BUFFER_SIZE];
     let mut payload_len = 0usize;
 
     let (mut read_half, mut write_half) = tokio::io::split(client);
@@ -160,13 +216,18 @@ pub async fn handle_tls_tunnel(
                 {
                     break;
                 }
+                
+                if payload_len >= buffer.len() - 1024 {
+                    error!("TLS header too large");
+                    return;
+                }
             }
             Ok(Err(e)) => {
-                error!("TLS read error: {}", e);
+                debug!("TLS read error: {}", e);
                 return;
             }
             Err(_) => {
-                error!("TLS read timeout");
+                debug!("TLS read timeout");
                 return;
             }
         }
@@ -174,12 +235,11 @@ pub async fn handle_tls_tunnel(
 
     let header = buffer[..payload_len].to_vec();
 
-    // TLS 连接需要特殊处理
     if is_http_header(&header) {
         // 发送响应头
         let response = generate_response_header(&header);
         if let Err(e) = write_half.write_all(response).await {
-            error!("TLS write response header error: {}", e);
+            debug!("TLS write response header error: {}", e);
             return;
         }
 
@@ -211,12 +271,7 @@ pub async fn start_http_tunnel(addr: &str, config: Arc<Config>, password: Arc<Ve
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
-                info!("New connection from {}", peer_addr);
-
-                // 设置 keep-alive
-                if let Err(e) = stream.set_nodelay(true) {
-                    error!("Set nodelay failed: {}", e);
-                }
+                debug!("New connection from {}", peer_addr);
 
                 let config = config.clone();
                 let password = password.clone();
@@ -227,7 +282,7 @@ pub async fn start_http_tunnel(addr: &str, config: Arc<Config>, password: Arc<Ve
             }
             Err(e) => {
                 error!("Accept error: {}", e);
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
     }
