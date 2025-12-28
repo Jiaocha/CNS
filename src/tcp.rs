@@ -37,52 +37,118 @@ pub fn get_proxy_host(header: &[u8], proxy_key: &str, password: &[u8]) -> Option
         info!("Host bytes (hex): {:02X?}", host_bytes);
         match decrypt_host(host_bytes, password) {
             Ok(decrypted) => {
-                let mut s = String::from_utf8_lossy(&decrypted).to_string();
-                info!("Decrypted host (raw): {:?}", s);
+                let raw = String::from_utf8_lossy(&decrypted).to_string();
+                info!("Decrypted host (raw): {:?}", raw);
                 
-                // 模糊修复 IP 地址中的常见位翻转乱码
-                // 已知乱码: > (62) -> . (46)
-                //           : (58) -> . (46)
-                //           < (60) -> . (46)
-                //           & (38) -> . (46)
-                //           ; (59) -> . (46)
-                //           % (37) -> . (46)
-                // 仅当字符串看起来像 IP 时才替换 (包含数字)
-                if s.chars().any(|c| c.is_ascii_digit()) {
-                    let original = s.clone();
-                    // 替换常见的错误字符为点
-                    // 只有当它们出现在数字之间时才安全？或者直接暴力替换
-                    // 考虑到 host 肯定是 IP 或域名，域名用点，IP 用点。
-                    // 这些符号在正常域名中也不常见（除了端口前的冒号）
-                    
-                    // 策略：如果包含 > < & %，大概率是乱码的点
-                    if s.contains(|c| matches!(c, '>' | '<' | '&' | '%' | ';')) {
-                        s = s.chars().map(|c| match c {
-                            '>' | '<' | '&' | '%' | ';' => '.',
-                            _ => c
-                        }).collect();
-                        info!("Sanitized host: {:?} -> {:?}", original, s);
-                    }
-                    
-                    // 修复端口冒号可能变成其他字符的情况? 
-                    // 暂时先只修复点，因为点是 IP 的核心
+                // 智能清理和恢复 IP 地址
+                // clnc 的加密与服务器不完全兼容，解密后可能包含乱码
+                // 但前几个字符通常是正确的 IP 开头
+                let cleaned = smart_clean_host(&raw);
+                if cleaned != raw {
+                    info!("Cleaned host: {:?} -> {:?}", raw, cleaned);
                 }
                 
-                Some(s)
+                Some(cleaned)
             },
             Err(e) => {
                 error!("Decrypt host failed: {}", e);
-                // 尝试用空密码解密看看（排除密码错误）
-                // 仅用于调试
-                if let Ok(d) = decrypt_host(host_bytes, &[]) {
-                     info!("Decrypted with empty password: {:?}", String::from_utf8_lossy(&d));
-                }
                 None
             }
         }
     } else {
         String::from_utf8(host_bytes.to_vec()).ok()
     }
+}
+
+/// 智能清理解密后的主机名
+/// 处理部分正确的解密结果，提取有效的 IP:PORT 格式
+fn smart_clean_host(raw: &str) -> String {
+    // 收集看起来有效的部分
+    let mut ip_parts: Vec<String> = Vec::new();
+    let mut current_num = String::new();
+    let mut port = String::new();
+    let mut found_port_sep = false;
+    let mut dot_count = 0;
+    
+    for ch in raw.chars() {
+        if ch.is_ascii_digit() {
+            if found_port_sep {
+                port.push(ch);
+            } else {
+                current_num.push(ch);
+            }
+        } else if (ch == '.' || ch == '>' || ch == '<' || ch == '&' || ch == '%' || ch == ';' || ch == '=' || ch == '!' || ch == '"') && !found_port_sep {
+            // 这些字符可能是乱码的点
+            if !current_num.is_empty() && dot_count < 3 {
+                // 验证数字在 0-255 范围内
+                if let Ok(n) = current_num.parse::<u16>() {
+                    if n <= 255 {
+                        ip_parts.push(current_num.clone());
+                        dot_count += 1;
+                    }
+                }
+                current_num.clear();
+            }
+        } else if ch == ':' && !found_port_sep {
+            // 可能是端口分隔符
+            if !current_num.is_empty() {
+                if let Ok(n) = current_num.parse::<u16>() {
+                    if n <= 255 {
+                        ip_parts.push(current_num.clone());
+                    }
+                }
+                current_num.clear();
+            }
+            if ip_parts.len() == 4 {
+                found_port_sep = true;
+            }
+        } else if ch == ' ' || ch == '\t' {
+            // 空格可能是分隔符，先收集当前数字
+            if !current_num.is_empty() && !found_port_sep {
+                if let Ok(n) = current_num.parse::<u16>() {
+                    if n <= 255 && dot_count < 4 {
+                        ip_parts.push(current_num.clone());
+                        dot_count += 1;
+                    }
+                }
+                current_num.clear();
+            }
+        }
+        // 其他乱码字符忽略
+    }
+    
+    // 处理最后一个数字
+    if !current_num.is_empty() && !found_port_sep {
+        if let Ok(n) = current_num.parse::<u16>() {
+            if n <= 255 && ip_parts.len() < 4 {
+                ip_parts.push(current_num);
+            }
+        }
+    }
+    
+    // 构建清理后的地址
+    if ip_parts.len() == 4 {
+        let ip = ip_parts.join(".");
+        if !port.is_empty() {
+            if let Ok(p) = port.parse::<u16>() {
+                if p > 0 {
+                    return format!("{}:{}", ip, p);
+                }
+            }
+        }
+        // 如果没有有效端口，返回 IP:80
+        return format!("{}:80", ip);
+    }
+    
+    // 无法提取有效 IP，返回原始字符串（可能是域名）
+    // 清理明显的乱码字符
+    raw.chars()
+        .map(|c| match c {
+            '>' | '<' | '&' | '%' | ';' | '=' | '!' | '"' => '.',
+            _ if c.is_ascii_graphic() || c == ' ' => c,
+            _ => '?',
+        })
+        .collect()
 }
 
 /// TCP 双向转发（单方向）- 带加密支持
