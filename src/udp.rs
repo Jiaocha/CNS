@@ -114,6 +114,7 @@ async fn client_to_server(
     udp_socket: &UdpSocket,
     initial_data: Option<Vec<u8>>,
     initial_password_index: usize,
+    initial_data_decrypted: bool, // 标记初始数据是否已解密
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
 ) {
@@ -121,18 +122,55 @@ async fn client_to_server(
     let mut payload_len = 0usize;
     // 从初始化返回的密钥索引开始
     let mut password_index = initial_password_index;
+    // 跟踪是否已经解密（初始数据可能未解密）
+    let mut has_decrypted = initial_data_decrypted;
 
-    // 处理初始数据（已经被解密了）
+    // 处理初始数据
     if let Some(data) = initial_data {
-        debug!("client_to_server: processing initial data, len={}", data.len());
-        let w_len = write_to_server(udp_socket, &data).await;
-        if w_len == -1 {
-            return;
+        debug!("client_to_server: processing initial data, len={}, decrypted={}", data.len(), initial_data_decrypted);
+        
+        // 如果初始数据未解密，先解密
+        if !initial_data_decrypted && !password.is_empty() && data.len() >= 5 {
+            // 尝试验证并解密
+            let mut test_data = [0u8; 5];
+            test_data.copy_from_slice(&data[..5]);
+            xor_crypt(&mut test_data, &password, 0);
+            
+            // 验证协议头
+            if test_data[2] == 0 && test_data[3] == 0 && test_data[4] == 0 {
+                // 验证通过，解密整个数据
+                buffer[..data.len()].copy_from_slice(&data);
+                password_index = xor_crypt(&mut buffer[..data.len()], &password, 0);
+                payload_len = data.len();
+                has_decrypted = true;
+            } else {
+                // 验证失败，可能是数据不完整，先不解密
+                buffer[..data.len()].copy_from_slice(&data);
+                payload_len = data.len();
+            }
+        } else if initial_data_decrypted {
+            // 初始数据已解密，直接使用
+            buffer[..data.len()].copy_from_slice(&data);
+            payload_len = data.len();
+        } else {
+            // 无密码或数据不足，直接使用
+            buffer[..data.len()].copy_from_slice(&data);
+            payload_len = data.len();
         }
-        let w_len = w_len as usize;
-        if w_len < data.len() {
-            payload_len = data.len() - w_len;
-            buffer[..payload_len].copy_from_slice(&data[w_len..]);
+        
+        // 尝试发送到服务器
+        if payload_len >= 12 {
+            let w_len = write_to_server(udp_socket, &buffer[..payload_len]).await;
+            if w_len == -1 {
+                return;
+            }
+            let w_len = w_len as usize;
+            if w_len < payload_len {
+                buffer.copy_within(w_len..payload_len, 0);
+                payload_len -= w_len;
+            } else {
+                payload_len = 0;
+            }
         }
     }
 
@@ -143,10 +181,23 @@ async fn client_to_server(
         match read_result {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
-                debug!("client_to_server: read {} bytes from client", n);
+                debug!("client_to_server: read {} bytes from client, payload_len={}", n, payload_len);
                 
-                // 解密（使用当前密钥索引继续）
-                if !password.is_empty() {
+                // 如果还未解密，尝试验证并解密
+                if !has_decrypted && !password.is_empty() && payload_len + n >= 5 {
+                    // 尝试验证并解密
+                    let mut test_data = [0u8; 5];
+                    test_data.copy_from_slice(&buffer[..5]);
+                    xor_crypt(&mut test_data, &password, 0);
+                    
+                    // 验证协议头
+                    if test_data[2] == 0 && test_data[3] == 0 && test_data[4] == 0 {
+                        // 验证通过，解密整个数据
+                        password_index = xor_crypt(&mut buffer[..payload_len + n], &password, 0);
+                        has_decrypted = true;
+                    }
+                } else if has_decrypted && !password.is_empty() {
+                    // 已解密，继续解密新数据
                     password_index = xor_crypt(
                         &mut buffer[payload_len..payload_len + n],
                         &password,
@@ -345,17 +396,24 @@ pub async fn handle_udp_session(
 
     // 2. 初始化 UDP 数据 (验证)
     // 此时 buffer 应该包含 Encrypted Payload
-    let initial_password_index = if !buffer.is_empty() {
-        match init_udp_data(&mut buffer, &password) {
-            Ok(idx) => idx,
-            Err(e) => {
-                error!("Init UDP session failed: {}", e);
-                // 如果验证失败，可能是还没收全？但 init_udp_data 只需要 5 字节
-                return;
+    // 参考 Go 版本：只有当数据足够时才进行验证，否则允许继续读取
+    let (initial_password_index, initial_data_decrypted) = if !buffer.is_empty() {
+        // UDP 数据包最小长度为 12 字节（IPv4）或 24 字节（IPv6）
+        // 如果数据不足，暂不验证，让后续读取补充完整
+        if buffer.len() < 12 {
+            debug!("Initial data too short ({} bytes), deferring validation", buffer.len());
+            (0, false)
+        } else {
+            match init_udp_data(&mut buffer, &password) {
+                Ok(idx) => (idx, true),
+                Err(e) => {
+                    error!("Init UDP session failed: {}", e);
+                    return;
+                }
             }
         }
     } else {
-        0
+        (0, false)
     };
 
     // 传入剩余的 buffer 作为 initial_data
@@ -367,7 +425,7 @@ pub async fn handle_udp_session(
 
     // 双向转发
     tokio::select! {
-        _ = client_to_server(&mut client_read, &udp_socket, initial_payload, initial_password_index, config, password) => {}
+        _ = client_to_server(&mut client_read, &udp_socket, initial_payload, initial_password_index, initial_data_decrypted, config, password) => {}
         _ = server_to_client(&mut client_write, &udp_socket2, config2, password2) => {}
     }
     
