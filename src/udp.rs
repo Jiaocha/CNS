@@ -201,10 +201,17 @@ async fn client_to_server(
                     // 验证协议头
                     if test_data[2] == 0 && test_data[3] == 0 && test_data[4] == 0 {
                         // 验证通过，解密整个数据
+                        info!("UDP Header verified. Raw first 16 bytes: {:02X?}", &buffer[..std::cmp::min(16, payload_len + n)]);
+                        
                         // 注意：这里我们是从头开始解密，所以 offset=0
                         password_index = xor_crypt(&mut buffer[..payload_len + n], &password, 0, 0);
+                        
+                        info!("Decrypted UDP data (first 32 bytes): {:02X?}", &buffer[..std::cmp::min(32, payload_len + n)]);
+                        
                         stream_offset = payload_len + n;
                         has_decrypted = true;
+                    } else {
+                        info!("UDP Header verify failed. Decrypted header: {:02X?}", test_data);
                     }
                 } else if has_decrypted && !password.is_empty() {
                     // 已解密，继续解密新数据
