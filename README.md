@@ -33,6 +33,77 @@
 | macOS | Intel x64 | `cns-macos-x64` |
 | macOS | Apple Silicon | `cns-macos-arm64` |
 
+## 安装
+
+### Linux 一键安装
+
+```bash
+# 下载并安装（自动检测架构）
+curl -fsSL https://raw.githubusercontent.com/Jiaocha/CNS/main/scripts/install.sh | bash
+
+# 或使用 wget
+wget -qO- https://raw.githubusercontent.com/Jiaocha/CNS/main/scripts/install.sh | bash
+```
+
+### Linux 手动安装
+
+```bash
+# AMD64
+wget https://github.com/Jiaocha/CNS/releases/latest/download/cns-linux-x64 -O /usr/local/bin/cns
+chmod +x /usr/local/bin/cns
+
+# ARM64
+wget https://github.com/Jiaocha/CNS/releases/latest/download/cns-linux-arm64 -O /usr/local/bin/cns
+chmod +x /usr/local/bin/cns
+
+# ARMv7
+wget https://github.com/Jiaocha/CNS/releases/latest/download/cns-linux-armv7 -O /usr/local/bin/cns
+chmod +x /usr/local/bin/cns
+```
+
+### Windows 安装
+
+1. 从 [Releases](https://github.com/Jiaocha/CNS/releases) 下载 `cns-windows-x64.exe`
+2. 放置到合适的目录
+3. 可选：添加到系统 PATH
+
+### 配置 systemd 服务 (Linux)
+
+```bash
+# 创建配置目录
+sudo mkdir -p /etc/cns
+
+# 创建配置文件
+sudo tee /etc/cns/config.json << 'EOF'
+{
+    "listen_addr": ["0.0.0.0:2222"],
+    "proxy_key": "Host",
+    "Enable_httpDNS": true
+}
+EOF
+
+# 创建 systemd 服务
+sudo tee /etc/systemd/system/cns.service << 'EOF'
+[Unit]
+Description=CuteBi Network Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cns --config /etc/cns/config.json
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 启动服务
+sudo systemctl daemon-reload
+sudo systemctl enable cns
+sudo systemctl start cns
+```
+
 ## 编译
 
 ### 本地编译
@@ -93,13 +164,17 @@ cross build --release --target armv7-unknown-linux-gnueabihf
 }
 ```
 
-## CI/CD
+## 卸载
 
-项目使用 GitHub Actions 自动构建多平台版本。推送 tag 时自动创建 Release。
+### Linux
 
 ```bash
-git tag v0.4.2
-git push --tags
+sudo systemctl stop cns
+sudo systemctl disable cns
+sudo rm -f /etc/systemd/system/cns.service
+sudo rm -f /usr/local/bin/cns
+sudo rm -rf /etc/cns
+sudo systemctl daemon-reload
 ```
 
 ## 相关项目
