@@ -352,7 +352,9 @@ pub async fn handle_udp_session(
     debug!("handle_udp_session: starting");
     
     // 创建 UDP socket
-    let udp_socket = match UdpSocket::bind("0.0.0.0:0").await {
+    // 使用 [::]:0 以支持双栈 (IPv4 + IPv6)
+    // 某些环境下 0.0.0.0 可能导致回包路由问题
+    let udp_socket = match UdpSocket::bind("[::]:0").await {
         Ok(s) => Arc::new(s),
         Err(e) => {
             error!("Failed to create UDP socket: {}", e);
