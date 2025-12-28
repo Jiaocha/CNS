@@ -23,13 +23,26 @@ jobs:
             artifact_name: cns.exe
             asset_name: cns-windows-x64.exe
 
-          # Linux AMD64
+          # Linux AMD64 (musl 静态链接，兼容性更好)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: cns
+            asset_name: cns-linux-x64-musl
+
+          # Linux AMD64 (glibc)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: cns
             asset_name: cns-linux-x64
 
-          # Linux ARM64
+          # Linux ARM64 (musl 静态链接)
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact_name: cns
+            asset_name: cns-linux-arm64-musl
+            cross: true
+
+          # Linux ARM64 (glibc)
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: cns
@@ -64,6 +77,10 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.target }}
+
+    - name: Install musl-tools (Linux x64 musl)
+      if: matrix.target == 'x86_64-unknown-linux-musl'
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
 
     - name: Install cross
       if: matrix.cross

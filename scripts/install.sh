@@ -13,7 +13,7 @@ NC='\033[0m'
 echo -e "${GREEN}"
 echo "  /) /)"
 echo "ฅ(՞•ﻌ•՞)ฅ"
-echo "CuteBi Network Server Installer"
+echo "CuteBi Network Server 安装脚本"
 echo -e "${NC}"
 echo "================================"
 
@@ -21,22 +21,22 @@ echo "================================"
 ARCH=$(uname -m)
 case "$ARCH" in
     x86_64)
-        BINARY="cns-linux-x64"
+        BINARY="cns-linux-x64-musl"
         ;;
     aarch64)
-        BINARY="cns-linux-arm64"
+        BINARY="cns-linux-arm64-musl"
         ;;
     armv7l|armhf)
         BINARY="cns-linux-armv7"
         ;;
     *)
-        echo -e "${RED}Unsupported architecture: $ARCH${NC}"
+        echo -e "${RED}不支持的架构: $ARCH${NC}"
         exit 1
         ;;
 esac
 
-echo -e "${YELLOW}Detected architecture: $ARCH${NC}"
-echo -e "${YELLOW}Downloading: $BINARY${NC}"
+echo -e "${YELLOW}检测到架构: $ARCH${NC}"
+echo -e "${YELLOW}正在下载: $BINARY${NC}"
 
 # 获取最新版本
 LATEST_URL="https://github.com/Jiaocha/CNS/releases/latest/download/$BINARY"
@@ -47,7 +47,7 @@ if command -v curl &> /dev/null; then
 elif command -v wget &> /dev/null; then
     wget -q "$LATEST_URL" -O /tmp/cns
 else
-    echo -e "${RED}Error: curl or wget required${NC}"
+    echo -e "${RED}错误: 需要安装 curl 或 wget${NC}"
     exit 1
 fi
 
@@ -68,7 +68,7 @@ if [ ! -f /etc/cns/config.json ]; then
     "Enable_dns_tcpOverUdp": true
 }
 EOF
-    echo -e "${GREEN}Created default config: /etc/cns/config.json${NC}"
+    echo -e "${GREEN}已创建默认配置: /etc/cns/config.json${NC}"
 fi
 
 # 创建 systemd 服务
@@ -91,17 +91,17 @@ EOF
 sudo systemctl daemon-reload
 
 echo ""
-echo -e "${GREEN}✓ Installation complete!${NC}"
+echo -e "${GREEN}✓ 安装完成!${NC}"
 echo ""
-echo "Usage:"
-echo "  sudo systemctl start cns     # Start service"
-echo "  sudo systemctl stop cns      # Stop service"
-echo "  sudo systemctl enable cns    # Enable on boot"
-echo "  sudo systemctl status cns    # Check status"
+echo "使用方法:"
+echo "  sudo systemctl start cns     # 启动服务"
+echo "  sudo systemctl stop cns      # 停止服务"
+echo "  sudo systemctl enable cns    # 开机自启"
+echo "  sudo systemctl status cns    # 查看状态"
 echo ""
-echo "Config file: /etc/cns/config.json"
+echo "配置文件: /etc/cns/config.json"
 echo ""
 
 # 版本信息
-echo -e "${YELLOW}Installed version:${NC}"
-/usr/local/bin/cns --help 2>&1 | head -5 || true
+echo -e "${YELLOW}已安装版本:${NC}"
+/usr/local/bin/cns --help 2>&1 | head -5 || echo -e "${GREEN}CNS 已安装成功${NC}"
