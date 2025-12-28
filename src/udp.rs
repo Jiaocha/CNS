@@ -83,18 +83,16 @@ async fn write_to_server(udp_socket: &UdpSocket, data: &[u8]) -> i32 {
 }
 
 /// 初始化 UDP 数据（验证加密数据）
-/// 返回 Ok(password_index) 解密数据并返回密钥索引
-fn init_udp_data(data: &mut [u8], password: &[u8]) -> Result<usize, &'static str> {
+/// 返回 Ok((password_index, stream_offset)) 解密数据并返回密钥索引和流偏移
+fn init_udp_data(data: &mut [u8], password: &[u8]) -> Result<(usize, usize), &'static str> {
     if !password.is_empty() && data.len() >= 5 {
         // 解密前5字节进行验证
+        // 验证时 stream_offset 从 0 开始
         let mut test_data = [0u8; 5];
         test_data.copy_from_slice(&data[..5]);
-        xor_crypt(&mut test_data, password, 0);
+        xor_crypt(&mut test_data, password, 0, 0);
 
         // 验证协议头: de[2] != 0 || de[3] != 0 || de[4] != 0
-        // Go 代码检查 [2], [3], [4] 都为 0
-        // 验证协议头: de[2] != 0 || de[3] != 0 || de[4] != 0
-        // Go 代码检查 [2], [3], [4] 都为 0
         if test_data[2] != 0 || test_data[3] != 0 || test_data[4] != 0 {
             info!("UDP Verify failed. Raw (hex): {:02X?}", &data[..std::cmp::min(data.len(), 16)]);
             info!("Decrypted header (hex): {:02X?}", test_data);
@@ -102,9 +100,10 @@ fn init_udp_data(data: &mut [u8], password: &[u8]) -> Result<usize, &'static str
         }
 
         // 解密整个数据，返回密钥索引
-        Ok(xor_crypt(data, password, 0))
+        // 这里的 stream_offset 为 0，因为是整个流的开始
+        Ok((xor_crypt(data, password, 0, 0), data.len()))
     } else {
-        Ok(0)
+        Ok((0, 0))
     }
 }
 
@@ -115,6 +114,7 @@ async fn client_to_server(
     initial_data: Option<Vec<u8>>,
     initial_password_index: usize,
     initial_data_decrypted: bool, // 标记初始数据是否已解密
+    initial_stream_offset: usize, // 初始流偏移
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
 ) {
@@ -122,6 +122,8 @@ async fn client_to_server(
     let mut payload_len = 0usize;
     // 从初始化返回的密钥索引开始
     let mut password_index = initial_password_index;
+    let mut stream_offset = initial_stream_offset;
+    
     // 跟踪是否已经解密（初始数据可能未解密）
     let mut has_decrypted = initial_data_decrypted;
 
@@ -134,13 +136,14 @@ async fn client_to_server(
             // 尝试验证并解密
             let mut test_data = [0u8; 5];
             test_data.copy_from_slice(&data[..5]);
-            xor_crypt(&mut test_data, &password, 0);
+            xor_crypt(&mut test_data, &password, 0, 0); // initial offset 0
             
             // 验证协议头
             if test_data[2] == 0 && test_data[3] == 0 && test_data[4] == 0 {
                 // 验证通过，解密整个数据
                 buffer[..data.len()].copy_from_slice(&data);
-                password_index = xor_crypt(&mut buffer[..data.len()], &password, 0);
+                password_index = xor_crypt(&mut buffer[..data.len()], &password, 0, 0);
+                stream_offset = data.len();
                 payload_len = data.len();
                 has_decrypted = true;
             } else {
@@ -152,10 +155,14 @@ async fn client_to_server(
             // 初始数据已解密，直接使用
             buffer[..data.len()].copy_from_slice(&data);
             payload_len = data.len();
+            // 注意：如果已解密，stream_offset 应该由 adjust logic 处理
         } else {
             // 无密码或数据不足，直接使用
             buffer[..data.len()].copy_from_slice(&data);
             payload_len = data.len();
+            if password.is_empty() {
+                has_decrypted = true;
+            }
         }
         
         // 尝试发送到服务器
@@ -181,28 +188,34 @@ async fn client_to_server(
         match read_result {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
-                debug!("client_to_server: read {} bytes from client, payload_len={}", n, payload_len);
+                debug!("client_to_server: read {} bytes from client, payload_len={}, stream_offset={}", n, payload_len, stream_offset);
                 
                 // 如果还未解密，尝试验证并解密
                 if !has_decrypted && !password.is_empty() && payload_len + n >= 5 {
                     // 尝试验证并解密
+                    // 此时 stream_offset 应该还是 0，因为还没找到头
                     let mut test_data = [0u8; 5];
                     test_data.copy_from_slice(&buffer[..5]);
-                    xor_crypt(&mut test_data, &password, 0);
+                    xor_crypt(&mut test_data, &password, 0, 0);
                     
                     // 验证协议头
                     if test_data[2] == 0 && test_data[3] == 0 && test_data[4] == 0 {
                         // 验证通过，解密整个数据
-                        password_index = xor_crypt(&mut buffer[..payload_len + n], &password, 0);
+                        // 注意：这里我们是从头开始解密，所以 offset=0
+                        password_index = xor_crypt(&mut buffer[..payload_len + n], &password, 0, 0);
+                        stream_offset = payload_len + n;
                         has_decrypted = true;
                     }
                 } else if has_decrypted && !password.is_empty() {
                     // 已解密，继续解密新数据
+                    // 使用 current password_index 和 current stream_offset
                     password_index = xor_crypt(
                         &mut buffer[payload_len..payload_len + n],
                         &password,
                         password_index,
+                        stream_offset,
                     );
+                    stream_offset += n;
                 }
 
                 payload_len += n;
@@ -405,7 +418,7 @@ pub async fn handle_udp_session(
             (0, false)
         } else {
             match init_udp_data(&mut buffer, &password) {
-                Ok(idx) => (idx, true),
+                Ok((idx, _offset)) => (idx, true), // offset is data.len()
                 Err(e) => {
                     error!("Init UDP session failed: {}", e);
                     return;
@@ -416,6 +429,29 @@ pub async fn handle_udp_session(
         (0, false)
     };
 
+    // 如果初始化解密成功，initial_stream_offset 应该是 buffer.len() ?
+    // 不，`init_udp_data` return `(idx, len)`. But `client_to_server` handles `initial_data` separately.
+    // In `client_to_server`, if `initial_data_decrypted` is true, it assumes data is plaintext.
+    // But `client_to_server` logic for `stream_offset` logic: 
+    // If we pass `initial_stream_offset`, it starts there.
+    // If `initial_data` is decrypted, its length should contribute to offset?
+    // In `client_to_server`:
+    // if `initial_data` is sent, `stream_offset` isn't updated?
+    // `client_to_server` signature was: `fn...(..., initial_stream_offset, ...)`
+    // And logic: `let mut stream_offset = initial_stream_offset;`
+    // If `initial_data` was decrypted in `handle_udp_session`, then effectively we consumed those bytes from the "encryption stream".
+    // So `initial_stream_offset` passed to `client_to_server` should be `0`.
+    // BUT `client_to_server` does NOT use `stream_offset` for `initial_data` if it is already decrypted.
+    // It DOES increment `stream_offset` for loop reads.
+    // So if we processed `N` bytes as initial data, the next read starts at offset `N`.
+    // So `initial_stream_offset` passed to `client_to_server` should be `buffer.len()` if decrypted?
+    // Wait. `client_to_server` logic:
+    // `loop { read n; decrypt(..., stream_offset); stream_offset += n }`
+    // If `initial_data` (len N) was processed before loop. The loop reads start at N.
+    // So yes, `initial_stream_offset` should be `buffer.len()` if buffer was processed.
+    
+    let initial_stream_offset = if initial_data_decrypted { buffer.len() } else { 0 };
+
     // 传入剩余的 buffer 作为 initial_data
     let initial_payload = if buffer.is_empty() { None } else { Some(buffer) };
     
@@ -425,7 +461,7 @@ pub async fn handle_udp_session(
 
     // 双向转发
     tokio::select! {
-        _ = client_to_server(&mut client_read, &udp_socket, initial_payload, initial_password_index, initial_data_decrypted, config, password) => {}
+        _ = client_to_server(&mut client_read, &udp_socket, initial_payload, initial_password_index, initial_data_decrypted, initial_stream_offset, config, password) => {}
         _ = server_to_client(&mut client_write, &udp_socket2, config2, password2) => {}
     }
     

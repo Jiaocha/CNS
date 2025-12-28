@@ -94,6 +94,7 @@ async fn forward_one_direction_encrypted(
 ) {
     let mut buffer = vec![0u8; BUFFER_SIZE];
     let mut password_index = 0usize;
+    let mut stream_offset = 0usize;
 
     loop {
         let read_result = timeout(config.tcp_timeout(), from.read(&mut buffer)).await;
@@ -103,7 +104,8 @@ async fn forward_one_direction_encrypted(
             Ok(Ok(n)) => {
                 // 解密
                 if !password.is_empty() {
-                    password_index = xor_crypt(&mut buffer[..n], password, password_index);
+                    password_index = xor_crypt(&mut buffer[..n], password, password_index, stream_offset);
+                    stream_offset = stream_offset.wrapping_add(n);
                 }
 
                 // 写入目标

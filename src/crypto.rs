@@ -4,17 +4,18 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// XOR 加密/解密
 /// 
-/// 对数据进行简单的 XOR 加密，返回密码索引位置
-/// 注意：CLNC 客户端使用数据索引作为掩码，但这里使用纯密码索引
-pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize) -> usize {
+/// 对数据进行 XOR 加密，返回新的密码索引
+/// 算法: byte ^= password[pwd_idx] | (stream_idx as u8)
+pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, stream_offset: usize) -> usize {
     if password.is_empty() {
         return password_index;
     }
 
-    for byte in data.iter_mut() {
-        // 简单 XOR：只使用 password[idx]，不加任何掩码修改
-        // 测试 ZJL 修改版是否使用了更简单的加密方式
-        *byte ^= password[password_index];
+    for (i, byte) in data.iter_mut().enumerate() {
+        let stream_idx = stream_offset.wrapping_add(i);
+        // 使用流的绝对位置(mod 256)作为掩码的一部分
+        *byte ^= password[password_index] | (stream_idx as u8);
+        
         password_index += 1;
         if password_index == password.len() {
             password_index = 0;
@@ -36,7 +37,8 @@ pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, Dec
     }
 
     // XOR 解密
-    xor_crypt(&mut decoded, password, 0);
+    // Host 解密时，stream_offset 必须为 0，因为它是整个流的开始
+    xor_crypt(&mut decoded, password, 0, 0);
 
     // 验证结尾的 null 字节
     // 注意：某些情况下解密可能存在位翻转导致 null 变为其他值
@@ -58,7 +60,7 @@ pub fn encrypt_host(host: &[u8], password: &[u8]) -> String {
     let mut data = host.to_vec();
     data.push(0); // 添加结尾的 null 字节
 
-    xor_crypt(&mut data, password, 0);
+    xor_crypt(&mut data, password, 0, 0);
     STANDARD.encode(&data)
 }
 
@@ -93,13 +95,15 @@ mod tests {
         let mut data = original.to_vec();
 
         // 加密
-        let index = xor_crypt(&mut data, password, 0);
+        let index = xor_crypt(&mut data, password, 0, 0);
         assert_ne!(&data, original);
 
         // 解密
-        xor_crypt(&mut data, password, 0);
+        xor_crypt(&mut data, password, 0, 0);
         assert_eq!(&data, original);
-        assert_eq!(index, original.len() % password.len());
+        
+        let expected_pidx = original.len() % password.len();
+        assert_eq!(index, expected_pidx);
     }
 
     #[test]
