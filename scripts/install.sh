@@ -63,20 +63,32 @@ echo ""
 echo -e "${CYAN}========== 服务器配置 ==========${NC}"
 echo ""
 
+# 从 /dev/tty 读取用户输入（绕过管道）
+prompt_input() {
+    local prompt="$1"
+    local default="$2"
+    local result
+    
+    echo -n "$prompt" > /dev/tty
+    read result < /dev/tty || result="$default"
+    
+    if [ -z "$result" ]; then
+        result="$default"
+    fi
+    echo "$result"
+}
+
 # 获取监听端口
-read -p "请输入监听端口 [默认: 2222]: " LISTEN_PORT
-LISTEN_PORT=${LISTEN_PORT:-2222}
+LISTEN_PORT=$(prompt_input "请输入监听端口 [默认: 2222]: " "2222")
 
 # 获取代理 Key
-read -p "请输入代理 Key [默认: Host]: " PROXY_KEY
-PROXY_KEY=${PROXY_KEY:-Host}
+PROXY_KEY=$(prompt_input "请输入代理 Key [默认: Host]: " "Host")
 
 # 获取加密密码
-read -p "请输入加密密码 [留空则不加密]: " ENCRYPT_PASSWORD
+ENCRYPT_PASSWORD=$(prompt_input "请输入加密密码 [留空则不加密]: " "")
 
 # HTTP DNS
-read -p "是否启用 HTTP DNS? (y/n) [默认: y]: " ENABLE_DNS
-ENABLE_DNS=${ENABLE_DNS:-y}
+ENABLE_DNS=$(prompt_input "是否启用 HTTP DNS? (y/n) [默认: y]: " "y")
 if [ "$ENABLE_DNS" = "y" ] || [ "$ENABLE_DNS" = "Y" ]; then
     ENABLE_HTTP_DNS="true"
 else
@@ -84,14 +96,12 @@ else
 fi
 
 # TLS 配置
-read -p "是否启用 TLS? (y/n) [默认: n]: " ENABLE_TLS
-ENABLE_TLS=${ENABLE_TLS:-n}
+ENABLE_TLS=$(prompt_input "是否启用 TLS? (y/n) [默认: n]: " "n")
 
 TLS_CONFIG=""
 if [ "$ENABLE_TLS" = "y" ] || [ "$ENABLE_TLS" = "Y" ]; then
-    read -p "请输入 TLS 监听端口 [默认: 443]: " TLS_PORT
-    TLS_PORT=${TLS_PORT:-443}
-    read -p "请输入证书域名 (用逗号分隔，留空自动生成): " TLS_HOSTS
+    TLS_PORT=$(prompt_input "请输入 TLS 监听端口 [默认: 443]: " "443")
+    TLS_HOSTS=$(prompt_input "请输入证书域名 (用逗号分隔，留空自动生成): " "")
     
     if [ -n "$TLS_HOSTS" ]; then
         # 转换为 JSON 数组格式
@@ -167,8 +177,7 @@ EOF
 sudo systemctl daemon-reload
 
 # 询问是否启动服务
-read -p "是否立即启动服务? (y/n) [默认: y]: " START_NOW
-START_NOW=${START_NOW:-y}
+START_NOW=$(prompt_input "是否立即启动服务? (y/n) [默认: y]: " "y")
 
 if [ "$START_NOW" = "y" ] || [ "$START_NOW" = "Y" ]; then
     sudo systemctl start cns
