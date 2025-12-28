@@ -253,6 +253,7 @@ async fn server_to_client(
 ) {
     let mut buffer = vec![0u8; 65536];
     let mut password_index = 0usize;
+    let mut stream_offset = 0usize; // Maintenance of stream offset
 
     loop {
         // 从偏移 24 开始读取，留出协议头空间
@@ -262,16 +263,18 @@ async fn server_to_client(
             Ok(Ok((n, addr))) => {
                 debug!("server_to_client: received {} bytes from {}", n, addr);
                 
+                // ... (header construction logic is same) ...
+                // Duplicate header construction logic to keep context or just replace the inner part?
+                // The logical block is large.
+                // I will try to target the loop start and `xor_crypt` call.
+                // But `header_start` and `total_len` are calculated inside match.
+                
+                // Let's use `multi_replace` or large chunk replace.
+                // The tool call below replaces the variable init and loop structure.
+                
                 // 构建 httpUDP 协议头
-                // Go 代码通过检查 IPv4-mapped IPv6 地址来判断
-                // bytes.HasPrefix(RAddr.IP, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff})
                 let (header_start, total_len) = match addr.ip() {
                     IpAddr::V4(ip) => {
-                        // IPv4: 从偏移 12 开始（24-12=12字节协议头空间）
-                        // payload[12] = byte(payload_len + 10)
-                        // payload[13] = byte((payload_len + 10) >> 8)
-                        // copy(payload[14:18], []byte{0, 0, 0, 1})
-                        // copy(payload[18:22], []byte(RAddr.IP)[12:16])
                         buffer[12] = ((n + 10) & 0xFF) as u8;
                         buffer[13] = ((n + 10) >> 8) as u8;
                         buffer[14] = 0;
@@ -281,15 +284,9 @@ async fn server_to_client(
                         buffer[18..22].copy_from_slice(&ip.octets());
                         buffer[22] = (addr.port() >> 8) as u8;
                         buffer[23] = (addr.port() & 0xFF) as u8;
-                        // 总长度 = 12 (header from offset 12) + n (payload)
                         (12, 12 + n)
                     }
                     IpAddr::V6(ip) => {
-                        // IPv6: 从偏移 0 开始
-                        // payload[0] = byte(payload_len + 22)
-                        // payload[1] = byte((payload_len + 22) >> 8)
-                        // copy(payload[2:6], []byte{0, 0, 0, 3})
-                        // copy(payload[6:22], []byte(RAddr.IP))
                         buffer[0] = ((n + 22) & 0xFF) as u8;
                         buffer[1] = ((n + 22) >> 8) as u8;
                         buffer[2] = 0;
@@ -299,7 +296,6 @@ async fn server_to_client(
                         buffer[6..22].copy_from_slice(&ip.octets());
                         buffer[22] = (addr.port() >> 8) as u8;
                         buffer[23] = (addr.port() & 0xFF) as u8;
-                        // 总长度 = 24 (header from offset 0) + n (payload)
                         (0, 24 + n)
                     }
                 };
@@ -310,7 +306,9 @@ async fn server_to_client(
                         &mut buffer[header_start..header_start + total_len],
                         &password,
                         password_index,
+                        stream_offset,
                     );
+                    stream_offset += total_len;
                 }
 
                 debug!("server_to_client: sending {} bytes to client", total_len);

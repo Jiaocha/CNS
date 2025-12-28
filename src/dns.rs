@@ -86,6 +86,7 @@ pub async fn dns_tcp_over_udp(
                         &mut buffer[payload_len..payload_len + n],
                         &password,
                         password_index,
+                        0,
                     );
                 }
                 payload_len += n;
@@ -136,10 +137,10 @@ pub async fn dns_tcp_over_udp(
             buffer[0] = (n >> 8) as u8;
             buffer[1] = (n & 0xFF) as u8;
 
-            // 加密
-            if !password.is_empty() {
-                xor_crypt(&mut buffer[..2 + n], &password, 0);
-            }
+// 加密
+                if !password.is_empty() {
+                    xor_crypt(&mut buffer[..2 + n], &password, 0, 0);
+                }
 
             // 发送响应
             let _ = client.write_all(&buffer[..2 + n]).await;
