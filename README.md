@@ -1,6 +1,12 @@
 # CuteBi Network Server (Rust)
 
+[![Build Multi-Platform](https://github.com/Jiaocha/CNS/actions/workflows/build.yml/badge.svg)](https://github.com/Jiaocha/CNS/actions/workflows/build.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/Jiaocha/CNS)](https://github.com/Jiaocha/CNS/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 高性能网络代理服务器，支持 HTTP 隧道、HTTP DNS、TCP/UDP 转发、TLS 加密等功能。
+
+> 这是原 [mmmdbybyd/CNS](https://github.com/mmmdbybyd/CNS) Go 版本的 Rust 重写版本。
 
 ## 功能特性
 
@@ -11,6 +17,10 @@
 - ✅ TLS 支持（自动证书生成）
 - ✅ TCP Fast Open
 - ✅ 守护进程模式
+
+## 下载
+
+从 [Releases](https://github.com/Jiaocha/CNS/releases) 页面下载预编译版本。
 
 ## 支持平台
 
@@ -28,6 +38,8 @@
 ### 本地编译
 
 ```bash
+git clone https://github.com/Jiaocha/CNS.git
+cd CNS
 cargo build --release
 ```
 
@@ -89,6 +101,11 @@ cross build --release --target armv7-unknown-linux-gnueabihf
 git tag v0.4.2
 git push --tags
 ```
+
+## 相关项目
+
+- [mmmdbybyd/CNS](https://github.com/mmmdbybyd/CNS) - 原始 Go 版本
+- [mmmdbybyd/CLNC](https://github.com/mmmdbybyd/CLNC) - 配套客户端
 
 ## 许可证
 
