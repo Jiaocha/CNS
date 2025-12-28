@@ -120,6 +120,7 @@ async fn forward_one_direction_plain(
 pub async fn handle_tcp_session(
     client: TcpStream,
     header: Vec<u8>,
+    extra_data: Option<Vec<u8>>,
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
 ) {
@@ -137,7 +138,7 @@ pub async fn handle_tcp_session(
 
     // TCP DNS over UDP DNS
     if config.enable_dns_tcp_over_udp && host.ends_with(":53") {
-        dns_tcp_over_udp(client, &host, header, config, password).await;
+        dns_tcp_over_udp(client, &host, header, extra_data, config, password).await;
         return;
     }
 
@@ -151,7 +152,7 @@ pub async fn handle_tcp_session(
     debug!("Connecting to: {}", host);
 
     // 连接目标服务器
-    let server = match TcpStream::connect(&host).await {
+    let mut server = match TcpStream::connect(&host).await {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to connect to {}: {}", host, e);
@@ -167,6 +168,14 @@ pub async fn handle_tcp_session(
 
     // 优化：设置 TCP_NODELAY 减少延迟
     let _ = server.set_nodelay(true);
+
+    // 如果有额外的初始数据，先发送给服务器
+    if let Some(data) = extra_data {
+        if let Err(e) = server.write_all(&data).await {
+            error!("Failed to write initial data to server: {}", e);
+            return;
+        }
+    }
 
     // 使用 tokio::io::split 分割流
     let (mut client_read, mut client_write) = tokio::io::split(client);

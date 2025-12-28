@@ -161,18 +161,22 @@ pub async fn handle_tunnel(
             Ok(Ok(n)) => {
                 payload_len += n;
 
-                // 如果不是 HTTP 头或者已经读取到完整的 HTTP 头
-                if !is_http_header(&buffer[..payload_len])
-                    || buffer[..payload_len].ends_with(b"\n\r\n")
-                    || buffer[..payload_len].ends_with(b"\r\n\r\n")
-                {
+                // 检查是否包含完整的 HTTP 头（双换行）
+                if let Some(pos) = find_subsequence(&buffer[..payload_len], b"\r\n\r\n") {
+                    // 找到了分隔符，pos 是 \r 之前的索引
+                    // 头部长度 = pos + 4 (\r\n\r\n)
+                    // 剩余数据从 pos + 4 开始
                     break;
                 }
                 
-                // 防止缓冲区溢出
-                if payload_len >= buffer.len() - 1024 {
-                    error!("Header too large");
-                    return;
+                // 如果缓冲区满了还没找到头，或者是无效的非 HTTP 协议
+                if payload_len >= buffer.len() {
+                     // 也许是纯 UDP 数据？
+                     if !is_http_header(&buffer[..std::cmp::min(payload_len, 10)]) {
+                         break;
+                     }
+                     error!("Header too large");
+                     return;
                 }
             }
             Ok(Err(e)) => {
@@ -186,11 +190,24 @@ pub async fn handle_tunnel(
         }
     }
 
-    let header = buffer[..payload_len].to_vec();
+    // 尝试分离头部和可能的后续数据
+    let (header, extra_data) = if let Some(pos) = find_subsequence(&buffer[..payload_len], b"\r\n\r\n") {
+        let header_len = pos + 4;
+        (buffer[..header_len].to_vec(), Some(buffer[header_len..payload_len].to_vec()))
+    } else {
+        (buffer[..payload_len].to_vec(), None)
+    };
 
     if !is_http_header(&header) {
         // 非 HTTP 头，当作 UDP 会话处理
-        handle_udp_session(client, Some(header), config, password).await;
+        // 如果有 extra_data，需要合并 header 和 extra_data，或者按照原始 buffer 处理
+        // 但这里 header 已经是 buffer 的前一部分。
+        // 对于非 HTTP 头，我们应该把整个读取到的内容作为 initial_data
+        let mut initial_data = header;
+        if let Some(mut extra) = extra_data {
+            initial_data.append(&mut extra);
+        }
+        handle_udp_session(client, Some(initial_data), config, password).await;
     } else {
         // HTTP 头处理
         
@@ -211,9 +228,9 @@ pub async fn handle_tunnel(
 
         // 检查是否是 UDP 隧道
         if find_subsequence(&header, config.udp_flag.as_bytes()).is_some() {
-            handle_udp_session(client, None, config, password).await;
+            handle_udp_session(client, extra_data, config, password).await;
         } else {
-            handle_tcp_session(client, buffer, config, password).await;
+            handle_tcp_session(client, header, extra_data, config, password).await;
         }
     }
 }
@@ -238,14 +255,15 @@ pub async fn handle_tls_tunnel(
             Ok(Ok(n)) => {
                 payload_len += n;
 
-                if !is_http_header(&buffer[..payload_len])
-                    || buffer[..payload_len].ends_with(b"\n\r\n")
-                    || buffer[..payload_len].ends_with(b"\r\n\r\n")
-                {
+                // 检查是否包含完整的 HTTP 头（双换行）
+                if let Some(pos) = find_subsequence(&buffer[..payload_len], b"\r\n\r\n") {
                     break;
                 }
                 
-                if payload_len >= buffer.len() - 1024 {
+                if payload_len >= buffer.len() {
+                    if !is_http_header(&buffer[..std::cmp::min(payload_len, 10)]) {
+                         break;
+                    }
                     error!("TLS header too large");
                     return;
                 }
@@ -261,7 +279,18 @@ pub async fn handle_tls_tunnel(
         }
     }
 
-    let header = buffer[..payload_len].to_vec();
+    // 尝试分离头部和可能的后续数据
+    let (header, extra_data) = if let Some(pos) = find_subsequence(&buffer[..payload_len], b"\r\n\r\n") {
+        let header_len = pos + 4;
+        let possible_header = &buffer[..header_len];
+        if is_http_header(possible_header) {
+             (possible_header.to_vec(), Some(buffer[header_len..payload_len].to_vec()))
+        } else {
+             (buffer[..payload_len].to_vec(), None)
+        }
+    } else {
+        (buffer[..payload_len].to_vec(), None)
+    };
 
     if is_http_header(&header) {
         // 发送响应头
@@ -277,9 +306,9 @@ pub async fn handle_tls_tunnel(
 
         // 检查是否是 UDP 隧道
         if find_subsequence(&header, config.udp_flag.as_bytes()).is_some() {
-            handle_udp_session(tcp_stream, None, config, password).await;
+            handle_udp_session(tcp_stream, extra_data, config, password).await;
         } else {
-            handle_tcp_session(tcp_stream, buffer, config, password).await;
+            handle_tcp_session(tcp_stream, header, extra_data, config, password).await;
         }
     }
 }

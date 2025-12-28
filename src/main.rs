@@ -126,6 +126,7 @@ async fn main() {
     }
 
     let config = Arc::new(config);
+    info!("Loaded password: {:?}", config.encrypt_password.as_bytes());
     let password = Arc::new(config.encrypt_password.as_bytes().to_vec());
 
     let mut handles = Vec::new();

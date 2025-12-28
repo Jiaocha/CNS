@@ -11,14 +11,48 @@ use tokio::time::timeout;
 /// TCP DNS over UDP DNS
 /// 
 /// 将 TCP DNS 请求转发到 UDP DNS 服务器
+/// TCP DNS over UDP DNS
+/// 
+/// 将 TCP DNS 请求转发到 UDP DNS 服务器
 pub async fn dns_tcp_over_udp(
     mut client: TcpStream,
     host: &str,
-    mut buffer: Vec<u8>,
+    _header: Vec<u8>, // 忽略 HTTP 手握头
+    extra_data: Option<Vec<u8>>,
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
 ) {
-    let mut payload_len = buffer.len();
+    // 使用 extra_data 初始化缓冲区，如果为空则创建新缓冲区
+    let mut buffer = if let Some(data) = extra_data {
+        data
+    } else {
+        vec![0u8; 4096]
+    };
+    
+    // 如果 buffer 是从 extra_data 来的，payload_len 就是它的长度
+    // 如果是新建的，payload_len 初始为 0（需要扩展 buffer 来读取）
+    let mut payload_len = if buffer.capacity() == 4096 && buffer.len() == 4096 {
+        0 // 新建的 vec，长度为 4096 (vec![0; N])
+    } else {
+        buffer.len() // extra_data 的长度
+    };
+    
+    // 如果是新建的 buffer，我们需要 resize 来容纳数据吗？
+    // vec![0u8; 4096] 创建了长度为 4096 的 vec。
+    // 如果我们用 payload_len = 0，后续 read(&mut buffer[0..]) 会覆盖。
+    
+    if payload_len == 0 {
+        // 确保 buffer 有足够空间
+        if buffer.len() < 4096 {
+            buffer.resize(4096, 0);
+        }
+    } else {
+        // 如果有 extra_data，确保有后续读取的空间
+        if buffer.len() < 4096 {
+            buffer.resize(4096, 0);
+        }
+    }
+
     let mut password_index = 0usize;
 
     // 读取完整的 DNS 请求包
