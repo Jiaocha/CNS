@@ -1,6 +1,6 @@
 [package]
 name = "cns"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 authors = ["CuteBi <supercutename@gmail.com>"]
 description = "CuteBi Network Server - A high-performance network proxy server"

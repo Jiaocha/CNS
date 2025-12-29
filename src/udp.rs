@@ -215,23 +215,31 @@ async fn client_to_server(
                     }
                 } else if has_decrypted && !password.is_empty() {
                     // 已解密，继续解密新数据
-                    // 使用 current password_index 和 current stream_offset
+                    debug!("client_to_server: read {} bytes, continuing decryption. Current pwd_idx: {}", n, password_index);
+                    
                     password_index = xor_crypt(
                         &mut buffer[payload_len..payload_len + n],
                         &password,
                         password_index,
                         stream_offset,
                     );
+                    
+                    debug!("client_to_server: decrypted chunk. New pwd_idx: {}", password_index);
                     stream_offset += n;
                 }
-
+                
                 payload_len += n;
+                
+                // 循环处理所有完整的包
+                let mut packet_buffer = [0u8; 65536];
+                
+                // 处理并转发数据
+                let processed = write_to_server(udp_socket, &buffer[..payload_len]).await; // Assuming write_to_server signature is udp_socket, data
+                
+                debug!("client_to_server: processed {} bytes from buffer (len={})", processed, payload_len);
 
-                let w_len = write_to_server(udp_socket, &buffer[..payload_len]).await;
-                if w_len == -1 {
-                    return;
-                }
-                let w_len = w_len as usize;
+                // 移动剩余数据
+                let w_len = processed as usize; // Assuming processed is the number of bytes consumed
                 if w_len < payload_len {
                     buffer.copy_within(w_len..payload_len, 0);
                     payload_len -= w_len;
@@ -352,9 +360,7 @@ pub async fn handle_udp_session(
     debug!("handle_udp_session: starting");
     
     // 创建 UDP socket
-    // 使用 [::]:0 以支持双栈 (IPv4 + IPv6)
-    // 某些环境下 0.0.0.0 可能导致回包路由问题
-    let udp_socket = match UdpSocket::bind("[::]:0").await {
+    let udp_socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => Arc::new(s),
         Err(e) => {
             error!("Failed to create UDP socket: {}", e);
