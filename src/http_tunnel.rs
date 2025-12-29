@@ -207,7 +207,7 @@ pub async fn handle_tunnel(
         if let Some(mut extra) = extra_data {
             initial_data.append(&mut extra);
         }
-        handle_udp_session(client, Some(initial_data), config, password).await;
+        handle_udp_session(client, Some(initial_data), config).await;
     } else {
         // HTTP 头处理
         
@@ -228,7 +228,7 @@ pub async fn handle_tunnel(
 
         // 检查是否是 UDP 隧道
         if find_subsequence(&header, config.udp_flag.as_bytes()).is_some() {
-            handle_udp_session(client, extra_data, config, password).await;
+            handle_udp_session(client, extra_data, config).await;
         } else {
             handle_tcp_session(client, header, extra_data, config, password).await;
         }
@@ -306,7 +306,7 @@ pub async fn handle_tls_tunnel(
 
         // 检查是否是 UDP 隧道
         if find_subsequence(&header, config.udp_flag.as_bytes()).is_some() {
-            handle_udp_session(tcp_stream, extra_data, config, password).await;
+            handle_udp_session(tcp_stream, extra_data, config).await;
         } else {
             handle_tcp_session(tcp_stream, header, extra_data, config, password).await;
         }

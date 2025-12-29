@@ -3,360 +3,344 @@
 use crate::config::Config;
 use crate::crypto::xor_crypt;
 use log::{error, debug, info};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 
-/// 写入数据到 UDP 服务器
-/// 完全按照 Go 版本的逻辑实现
-async fn write_to_server(udp_socket: &UdpSocket, data: &[u8]) -> i32 {
-    let mut pkg_sub: usize = 0;
+/// 解析并转发数据到服务器
+/// 返回已处理的字节数
+async fn write_to_server(udp_socket: &Arc<UdpSocket>, data: &[u8]) -> i32 {
+    let data_len = data.len();
+    let mut pkg_sub = 0;
     
-    while pkg_sub + 2 < data.len() {
-        // 2字节储存包的长度（小端序），包括socks5头
+    // 循环处理数据中的所有包
+    // 格式: [Len_LB, Len_HB, Body...]
+    while pkg_sub + 2 < data_len {
         let pkg_len = (data[pkg_sub] as u16) | ((data[pkg_sub + 1] as u16) << 8);
-        let pkg_len = pkg_len as usize;
         
-        debug!("write_to_server: pkg_sub={}, pkg_len={}, data_len={}", pkg_sub, pkg_len, data.len());
-        
-        if pkg_sub + 2 + pkg_len > data.len() || pkg_len <= 10 {
-            debug!("write_to_server: invalid packet, returning 0");
-            return 0;
+        // 检查包是否完整
+        if pkg_sub + 2 + pkg_len as usize > data_len {
+            // 包不完整，等待更多数据
+            break;
         }
-        
-        // 检查保留字段 [pkgSub+3:pkgSub+5] == {0, 0}
-        // 注意：Go代码是 httpUDP_data[pkgSub+3:pkgSub+5]，即 [pkgSub+3] 和 [pkgSub+4]
-        if data[pkg_sub + 3] != 0 || data[pkg_sub + 4] != 0 {
-            debug!("write_to_server: reserved fields check failed, returning 1");
-            return 1;
+
+        // 验证保留字段 (Offset 2, 3, 4)
+        if pkg_len >= 10 {
+             if data[pkg_sub+2] != 0 || data[pkg_sub+3] != 0 || data[pkg_sub+4] != 0 {
+                  debug!("write_to_server: reserved fields check failed, likely decryption error. Skipping packet.");
+                  // 尝试跳过这个包
+                  pkg_sub += 2 + pkg_len as usize;
+                  continue;
+             }
         }
-        
-        // Go 代码: if httpUDP_data[5] == 1
-        // 注意：Go 代码使用的是固定偏移 5（相对于 pkgSub+2）
+
+        // 解析地址
         let addr_type = data[pkg_sub + 5];
-        
-        let (addr, header_len) = if addr_type == 1 {
-            // IPv4
-            let ip = Ipv4Addr::new(
-                data[pkg_sub + 6],
-                data[pkg_sub + 7],
-                data[pkg_sub + 8],
-                data[pkg_sub + 9],
-            );
-            let port = ((data[pkg_sub + 10] as u16) << 8) | (data[pkg_sub + 11] as u16);
-            debug!("write_to_server: IPv4 addr={}:{}", ip, port);
-            (SocketAddr::new(IpAddr::V4(ip), port), 12)
-        } else {
-            // IPv6
-            if pkg_len <= 24 {
-                debug!("write_to_server: pkg_len too small for IPv6, returning 0");
-                return 0;
-            }
-            let mut ip_bytes = [0u8; 16];
-            ip_bytes.copy_from_slice(&data[pkg_sub + 6..pkg_sub + 22]);
-            let ip = Ipv6Addr::from(ip_bytes);
-            let port = ((data[pkg_sub + 22] as u16) << 8) | (data[pkg_sub + 23] as u16);
-            debug!("write_to_server: IPv6 addr={}:{}", ip, port);
-            (SocketAddr::new(IpAddr::V6(ip), port), 24)
-        };
-        
-        // 发送 payload: httpUDP_data[pkgSub+httpUDP_protocol_head_len : pkgSub+2+pkgLen]
-        let payload_start = pkg_sub + header_len;
-        let payload_end = pkg_sub + 2 + pkg_len;
-        
-        debug!("write_to_server: sending {} bytes to {}", payload_end - payload_start, addr);
-        
-        match udp_socket.send_to(&data[payload_start..payload_end], addr).await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("write_to_server: send error: {}", e);
-                return -1;
-            }
+        let mut addr_len = 0;
+        let mut ip_addr = None;
+        let mut port = 0;
+
+        match addr_type {
+            1 => { // IPv4
+                addr_len = 4;
+                if pkg_sub + 10 + addr_len > data_len { break; }
+                let ip = Ipv4Addr::new(
+                    data[pkg_sub + 6],
+                    data[pkg_sub + 7],
+                    data[pkg_sub + 8],
+                    data[pkg_sub + 9],
+                );
+                ip_addr = Some(IpAddr::V4(ip));
+                port = (data[pkg_sub + 10] as u16) << 8 | (data[pkg_sub + 11] as u16);
+            },
+            3 => { // Domain
+                 if pkg_sub + 7 > data_len { break; }
+                 let len = data[pkg_sub + 6] as usize;
+                 addr_len = 1 + len;
+                  if pkg_sub + 7 + len + 2 > data_len { break; } // Domain + Port
+                   let domain_bytes = &data[pkg_sub + 7 .. pkg_sub + 7 + len];
+                   if let Ok(domain) = std::str::from_utf8(domain_bytes) {
+                        debug!("write_to_server: Domain address parsing (not fully supported): {}", domain);
+                   }
+                   port = (data[pkg_sub + 7 + len] as u16) << 8 | (data[pkg_sub + 7 + len + 1] as u16);
+            },
+            4 => { // IPv6
+                addr_len = 16;
+                if pkg_sub + 7 + addr_len + 2 > data_len { break; } // IPv6 + Port
+                 let ip = Ipv6Addr::from([
+                    data[pkg_sub+6], data[pkg_sub+7], data[pkg_sub+8], data[pkg_sub+9],
+                    data[pkg_sub+10], data[pkg_sub+11], data[pkg_sub+12], data[pkg_sub+13],
+                    data[pkg_sub+14], data[pkg_sub+15], data[pkg_sub+16], data[pkg_sub+17],
+                    data[pkg_sub+18], data[pkg_sub+19], data[pkg_sub+20], data[pkg_sub+21]
+                 ]);
+                 ip_addr = Some(IpAddr::V6(ip));
+                 port = (data[pkg_sub + 22] as u16) << 8 | (data[pkg_sub + 23] as u16);
+            },
+             _ => {
+                debug!("write_to_server: unknown address type {}", addr_type);
+                 pkg_sub += 2 + pkg_len as usize;
+                 continue;
+             }
         }
         
-        pkg_sub += 2 + pkg_len;
+        if let Some(ip) = ip_addr {
+            let target = SocketAddr::new(ip, port);
+            
+            let header_len = 7 + addr_len;
+            if pkg_len as usize >= header_len {
+                 let payload_start = pkg_sub + 2 + header_len;
+                 let payload_end = pkg_sub + 2 + pkg_len as usize;
+                 let payload = &data[payload_start .. payload_end];
+                 
+                 debug!("write_to_server: Parse OK. Sending {} bytes to {}", payload.len(), target);
+                 
+                 // 发送 UDP 数据
+                 if let Err(e) = udp_socket.send_to(payload, target).await {
+                     error!("write_to_server: send_to failed: {}", e);
+                 }
+            } else {
+                debug!("write_to_server: pkg_len {} too small for header_len {}", pkg_len, header_len);
+            }
+        }
+
+        pkg_sub += 2 + pkg_len as usize;
     }
     
     pkg_sub as i32
 }
 
-/// 初始化 UDP 数据（验证加密数据）
-/// 返回 Ok((password_index, stream_offset)) 解密数据并返回密钥索引和流偏移
-fn init_udp_data(data: &mut [u8], password: &[u8]) -> Result<(usize, usize), &'static str> {
-    if !password.is_empty() && data.len() >= 5 {
-        // 解密前5字节进行验证
-        // 验证时 stream_offset 从 0 开始
-        let mut test_data = [0u8; 5];
-        test_data.copy_from_slice(&data[..5]);
-        xor_crypt(&mut test_data, password, 0, 0);
-
-        // 验证协议头: de[2] != 0 || de[3] != 0 || de[4] != 0
-        if test_data[2] != 0 || test_data[3] != 0 || test_data[4] != 0 {
-            info!("UDP Verify failed. Raw (hex): {:02X?}", &data[..std::cmp::min(data.len(), 16)]);
-            info!("Decrypted header (hex): {:02X?}", test_data);
-            return Err("Is not httpUDP protocol or Decrypt failed");
-        }
-
-        // 解密整个数据，返回密钥索引
-        // 这里的 stream_offset 为 0，因为是整个流的开始
-        Ok((xor_crypt(data, password, 0, 0), data.len()))
-    } else {
-        Ok((0, 0))
-    }
-}
-
 /// 客户端到服务器转发
 async fn client_to_server(
-    client_read: &mut tokio::io::ReadHalf<TcpStream>,
-    udp_socket: &UdpSocket,
-    initial_data: Option<Vec<u8>>,
-    initial_password_index: usize,
-    initial_data_decrypted: bool, // 标记初始数据是否已解密
-    initial_stream_offset: usize, // 初始流偏移
-    config: Arc<Config>,
+    mut client_read: tokio::io::ReadHalf<TcpStream>,
+    udp_socket: Arc<UdpSocket>,
+    initial_data_vec: Option<Vec<u8>>,
     password: Arc<Vec<u8>>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = vec![0u8; 65536];
-    let mut payload_len = 0usize;
-    // 从初始化返回的密钥索引开始
-    let mut password_index = initial_password_index;
-    let mut stream_offset = initial_stream_offset;
+    let mut payload_len = 0;
     
-    // 跟踪是否已经解密（初始数据可能未解密）
-    let mut has_decrypted = initial_data_decrypted;
-
-    // 处理初始数据
-    if let Some(data) = initial_data {
-        debug!("client_to_server: processing initial data, len={}, decrypted={}", data.len(), initial_data_decrypted);
+    // 如果有初始数据，先放入 buffer
+    if let Some(data) = initial_data_vec {
+        if data.len() < buffer.len() {
+             buffer[..data.len()].copy_from_slice(&data);
+             payload_len = data.len();
+        }
+    }
+    
+    loop {
+        // 读取更多数据
+        if payload_len < buffer.len() {
+             // 设置短超时，以便处理已有的数据
+             let read_future = client_read.read(&mut buffer[payload_len..]);
+             match tokio::time::timeout(std::time::Duration::from_millis(10), read_future).await {
+                Ok(Ok(n)) => {
+                    if n == 0 {
+                        debug!("client_to_server: connection closed");
+                        break;
+                    }
+                    debug!("client_to_server: read {} bytes", n);
+                    payload_len += n;
+                },
+                Ok(Err(e)) => {
+                    error!("client_to_server: read error: {}", e);
+                    break;
+                },
+                Err(_) => {
+                    // Timeout, just process what we have
+                }
+             }
+        }
         
-        // 如果初始数据未解密，先解密
-        if !initial_data_decrypted && !password.is_empty() && data.len() >= 5 {
-            // 尝试验证并解密
-            let mut test_data = [0u8; 5];
-            test_data.copy_from_slice(&data[..5]);
-            xor_crypt(&mut test_data, &password, 0, 0); // initial offset 0
-            
-            // 验证协议头
-            if test_data[2] == 0 && test_data[3] == 0 && test_data[4] == 0 {
-                // 验证通过，解密整个数据
-                buffer[..data.len()].copy_from_slice(&data);
-                password_index = xor_crypt(&mut buffer[..data.len()], &password, 0, 0);
-                stream_offset = data.len();
-                payload_len = data.len();
-                has_decrypted = true;
-            } else {
-                // 验证失败，可能是数据不完整，先不解密
-                buffer[..data.len()].copy_from_slice(&data);
-                payload_len = data.len();
+        if payload_len == 0 {
+            // 如果没数据且没读到，继续等（这里其实应该更智能点，避免死循环空转）
+             // 实际上上面的 read 是有超时的。如果读不到，会在这里转圈。
+             // 稍微 sleep 一下避免 CPU 100%
+             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+             
+             // 再次尝试阻塞读取
+             match client_read.read(&mut buffer[payload_len..]).await {
+                 Ok(n) if n == 0 => break,
+                 Ok(n) => payload_len += n,
+                 Err(e) => { error!("client_to_server: read error: {}", e); break; }
+             }
+             if payload_len == 0 { break; }
+        }
+
+        // 尝试处理 buffer 中的包
+        // 关键逻辑：每个包都独立加密 (reset password_index to 0)
+        
+        let mut processed_total = 0;
+        
+        loop {
+            // 至少需要 2 字节来解析长度
+            if payload_len - processed_total < 2 {
+                break;
             }
-        } else if initial_data_decrypted {
-            // 初始数据已解密，直接使用
-            buffer[..data.len()].copy_from_slice(&data);
-            payload_len = data.len();
-            // 注意：如果已解密，stream_offset 应该由 adjust logic 处理
-        } else {
-            // 无密码或数据不足，直接使用
-            buffer[..data.len()].copy_from_slice(&data);
-            payload_len = data.len();
-            if password.is_empty() {
-                has_decrypted = true;
+            
+            let start = processed_total;
+            
+            // 偷看前 2 字节，用 pwd_idx=0 解密（不修改原 buffer）
+            let mut len_bytes = [buffer[start], buffer[start+1]];
+            if !password.is_empty() {
+                xor_crypt(&mut len_bytes, &password, 0, 0);
+            }
+            
+            // 解析包长度 (Little Endian)
+            let pkg_len = (len_bytes[0] as usize) | ((len_bytes[1] as usize) << 8);
+            
+            // 包总长 = 长度前缀(2) + Body(pkg_len)
+            let full_pkg_len = 2 + pkg_len;
+            
+            if payload_len - processed_total < full_pkg_len {
+                // 数据不足一个整包，等待读取
+                break;
+            }
+            
+            // 数据足够，解密这个完整的包（包括前缀）
+            debug!("client_to_server: Decrypting packet of len {} with idx 0", full_pkg_len);
+            
+            if !password.is_empty() {
+                // 必须在 buffer 上修改解密
+                xor_crypt(&mut buffer[start .. start + full_pkg_len], &password, 0, 0);
+            }
+            
+            // 调用 write_to_server 解析并转发
+            // 注意：write_to_server 会处理这些已解密的数据
+            let consumed = write_to_server(&udp_socket, &buffer[start .. start + full_pkg_len]).await;
+            
+            // 无论 write_to_server 返回消耗多少（它其实只处理这一个包），我们都认为这个包被处理了
+            // 因为这是 Packet-Based 的
+            processed_total += full_pkg_len;
+            
+            if consumed != full_pkg_len as i32 {
+                 debug!("client_to_server: parsing warning, consumed={} vs len={}", consumed, full_pkg_len);
             }
         }
         
-        // 尝试发送到服务器
-        if payload_len >= 12 {
-            let w_len = write_to_server(udp_socket, &buffer[..payload_len]).await;
-            if w_len == -1 {
-                return;
-            }
-            let w_len = w_len as usize;
-            if w_len < payload_len {
-                buffer.copy_within(w_len..payload_len, 0);
-                payload_len -= w_len;
+        // 移动剩余数据
+        if processed_total > 0 {
+            if processed_total < payload_len {
+                buffer.copy_within(processed_total..payload_len, 0);
+                payload_len -= processed_total;
             } else {
                 payload_len = 0;
             }
+        } else {
+             // 没有处理任何数据（数据不足），强制读更多
+             // 如果 buffer 满了还解析不出？那说明出大问题了（或者包巨大）
+             if payload_len >= buffer.len() {
+                 error!("client_to_server: buffer full but no packet parsed. Dropping connection.");
+                 break;
+             }
         }
     }
-
-    loop {
-        let read_result =
-            timeout(config.udp_timeout(), client_read.read(&mut buffer[payload_len..])).await;
-
-        match read_result {
-            Ok(Ok(0)) => break,
-            Ok(Ok(n)) => {
-                debug!("client_to_server: read {} bytes from client, payload_len={}, stream_offset={}", n, payload_len, stream_offset);
-                
-                // 如果还未解密，尝试验证并解密
-                if !has_decrypted && !password.is_empty() && payload_len + n >= 5 {
-                    // 尝试验证并解密
-                    // 此时 stream_offset 应该还是 0，因为还没找到头
-                    let mut test_data = [0u8; 5];
-                    test_data.copy_from_slice(&buffer[..5]);
-                    xor_crypt(&mut test_data, &password, 0, 0);
-                    
-                    // 验证协议头
-                    if test_data[2] == 0 && test_data[3] == 0 && test_data[4] == 0 {
-                        // 验证通过，解密整个数据
-                        info!("UDP Header verified. Raw first 16 bytes: {:02X?}", &buffer[..std::cmp::min(16, payload_len + n)]);
-                        
-                        // 注意：这里我们是从头开始解密，所以 offset=0
-                        password_index = xor_crypt(&mut buffer[..payload_len + n], &password, 0, 0);
-                        
-                        info!("Decrypted UDP data (first 32 bytes): {:02X?}", &buffer[..std::cmp::min(32, payload_len + n)]);
-                        
-                        stream_offset = payload_len + n;
-                        has_decrypted = true;
-                    } else {
-                        info!("UDP Header verify failed. Decrypted header: {:02X?}", test_data);
-                    }
-                } else if has_decrypted && !password.is_empty() {
-                    // 已解密，继续解密新数据
-                    debug!("client_to_server: read {} bytes, continuing decryption. Current pwd_idx: {}", n, password_index);
-                    
-                    password_index = xor_crypt(
-                        &mut buffer[payload_len..payload_len + n],
-                        &password,
-                        password_index,
-                        stream_offset,
-                    );
-                    
-                    debug!("client_to_server: decrypted chunk. New pwd_idx: {}", password_index);
-                    stream_offset += n;
-                }
-                
-                payload_len += n;
-                
-                // 循环处理所有完整的包
-                let mut packet_buffer = [0u8; 65536];
-                
-                // 处理并转发数据
-                let processed = write_to_server(udp_socket, &buffer[..payload_len]).await; // Assuming write_to_server signature is udp_socket, data
-                
-                debug!("client_to_server: processed {} bytes from buffer (len={})", processed, payload_len);
-
-                // 移动剩余数据
-                let w_len = processed as usize; // Assuming processed is the number of bytes consumed
-                if w_len < payload_len {
-                    buffer.copy_within(w_len..payload_len, 0);
-                    payload_len -= w_len;
-                } else {
-                    payload_len = 0;
-                }
-            }
-            Ok(Err(e)) => {
-                debug!("client_to_server: read error: {}", e);
-                break;
-            }
-            Err(_) => {
-                debug!("client_to_server: timeout");
-                break;
-            }
-        }
-    }
+    Ok(())
 }
 
 /// 服务器到客户端转发
 async fn server_to_client(
     client_write: &mut tokio::io::WriteHalf<TcpStream>,
-    udp_socket: &UdpSocket,
+    udp_socket: &Arc<UdpSocket>,
     config: Arc<Config>,
     password: Arc<Vec<u8>>,
-) {
+) -> std::io::Result<()> {
     let mut buffer = vec![0u8; 65536];
-    let mut password_index = 0usize;
-    let mut stream_offset = 0usize; // Maintenance of stream offset
+    
+    // 用于加密流的维护
+    // clnc 是 Per-Packet Encryption 吗？
+    // 如果 Client 发送是 Per-Packet，那么 Server 回复应该也是 Per-Packet？
+    // Go 版本的 udpServerToClient 也是流式的：
+    // udpSess.s2c_CuteBi_XorCrypt_passwordSub = CuteBi_XorCrypt(...)
+    // 但是 Go 版本在 handleUdpSession 里，passwordSub 也是 loop 变量。
+    // 如果 client -> server reset mask, 那么 server -> client 也应该 reset mask?
+    // v0.5.8 是流式的，导致了 timeout (server 收不到回包？或者发不回去？)
+    // 假设是 reset mask 0 for every packet sent back.
+    
+    let password_is_empty = password.is_empty();
 
     loop {
-        // 从偏移 24 开始读取，留出协议头空间
-        let recv_result = timeout(config.udp_timeout(), udp_socket.recv_from(&mut buffer[24..])).await;
-
-        match recv_result {
-            Ok(Ok((n, addr))) => {
-                debug!("server_to_client: received {} bytes from {}", n, addr);
-                
-                // ... (header construction logic is same) ...
-                // Duplicate header construction logic to keep context or just replace the inner part?
-                // The logical block is large.
-                // I will try to target the loop start and `xor_crypt` call.
-                // But `header_start` and `total_len` are calculated inside match.
-                
-                // Let's use `multi_replace` or large chunk replace.
-                // The tool call below replaces the variable init and loop structure.
-                
-                // 构建 httpUDP 协议头
-                let (header_start, total_len) = match addr.ip() {
-                    IpAddr::V4(ip) => {
-                        buffer[12] = ((n + 10) & 0xFF) as u8;
-                        buffer[13] = ((n + 10) >> 8) as u8;
-                        buffer[14] = 0;
-                        buffer[15] = 0;
-                        buffer[16] = 0;
-                        buffer[17] = 1; // addr type = IPv4
-                        buffer[18..22].copy_from_slice(&ip.octets());
-                        buffer[22] = (addr.port() >> 8) as u8;
-                        buffer[23] = (addr.port() & 0xFF) as u8;
-                        (12, 12 + n)
-                    }
-                    IpAddr::V6(ip) => {
-                        buffer[0] = ((n + 22) & 0xFF) as u8;
-                        buffer[1] = ((n + 22) >> 8) as u8;
-                        buffer[2] = 0;
-                        buffer[3] = 0;
-                        buffer[4] = 0;
-                        buffer[5] = 3; // addr type = IPv6
-                        buffer[6..22].copy_from_slice(&ip.octets());
-                        buffer[22] = (addr.port() >> 8) as u8;
-                        buffer[23] = (addr.port() & 0xFF) as u8;
-                        (0, 24 + n)
-                    }
-                };
-
-                // 加密
-                if !password.is_empty() {
-                    password_index = xor_crypt(
-                        &mut buffer[header_start..header_start + total_len],
-                        &password,
-                        password_index,
-                        stream_offset,
-                    );
-                    stream_offset += total_len;
-                }
-
-                debug!("server_to_client: sending {} bytes to client", total_len);
-                
-                // 发送给客户端
-                if let Err(e) = client_write
-                    .write_all(&buffer[header_start..header_start + total_len])
-                    .await
-                {
-                    error!("server_to_client: write error: {}", e);
-                    break;
-                }
-            }
+        let (n, addr) = match timeout(config.udp_timeout(), udp_socket.recv_from(&mut buffer[2..])).await {
+            Ok(Ok(res)) => res,
             Ok(Err(e)) => {
-                debug!("server_to_client: recv error: {}", e);
-                break;
+                error!("server_to_client: recv error: {}", e);
+                return Err(e);
             }
             Err(_) => {
                 debug!("server_to_client: timeout");
-                break;
+                return Ok(());
+            }
+        };
+
+        debug!("server_to_client: received {} bytes from {}", n, addr);
+
+        // 构造 socks5 头部回包
+        // Length (2 bytes) + [0,0,0] (Resv) + 1 (IPv4) + Addr + Port
+        // 实际上我们可能只需要把接收到的数据（不含Socks头）打包成 Socks UDP 格式？
+        // UDP over TCP 协议格式：[Len_LB, Len_HB, Body]
+        // Body 格式：Socks5 UDP Header + Payload.
+        // Socks5 UDP Header: RSV(2) FRAG(1) ATYP(1) ADDR PORT
+        
+        // 我们接收到的是纯 UDP payload。我们需要封装它。
+        
+        // 构造头部
+        // RSV, FRAG
+        // buffer[2] start.
+        // shift data? No, we recv at buffer[2..].
+        // Header space at buffer[0..].
+        // We need simplify construction.
+        // Let's build a new buffer.
+        
+        // UDP Response Body:
+        // RSV(2) 00 00
+        // FRAG(1) 00
+        // ATYP(1) 
+        // ADDR
+        // PORT
+        // DATA
+        
+        let mut packet = Vec::new(); // Length placeholder
+        packet.extend_from_slice(&[0, 0]); // Length
+        packet.extend_from_slice(&[0, 0, 0]); // RSV, FRAG
+        
+        match addr {
+            SocketAddr::V4(v4) => {
+                packet.push(1); // IPv4
+                packet.extend_from_slice(&v4.ip().octets());
+                packet.extend_from_slice(&v4.port().to_be_bytes());
+            },
+            SocketAddr::V6(v6) => {
+                packet.push(4); // IPv6
+                packet.extend_from_slice(&v6.ip().octets());
+                packet.extend_from_slice(&v6.port().to_be_bytes());
             }
         }
+        
+        // DATA
+        packet.extend_from_slice(&buffer[2..2+n]);
+        
+        // Fill Length
+        let total_body_len = packet.len() - 2;
+        packet[0] = total_body_len as u8;
+        packet[1] = (total_body_len >> 8) as u8;
+        
+        // Encrypt (Reset idx 0)
+        if !password_is_empty {
+            xor_crypt(&mut packet, &password, 0, 0);
+        }
+        
+        client_write.write_all(&packet).await?;
     }
 }
 
+
 /// 处理 UDP 会话
-// 处理 UDP 会话
 pub async fn handle_udp_session(
-    client: TcpStream,
+    mut client: TcpStream,
     initial_data: Option<Vec<u8>>,
     config: Arc<Config>,
-    password: Arc<Vec<u8>>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     debug!("handle_udp_session: starting");
     
     // 创建 UDP socket
@@ -364,121 +348,51 @@ pub async fn handle_udp_session(
         Ok(s) => Arc::new(s),
         Err(e) => {
             error!("Failed to create UDP socket: {}", e);
-            return;
+            return Err(Box::new(e));
         }
     };
 
-    let (mut client_read, mut client_write) = tokio::io::split(client);
+    let password = Arc::new(config.encrypt_password.clone().into_bytes());
     
-    // 1. 完整读取并剥离头部 (直到 \r\n\r\n)
-    let mut buffer = Vec::new();
-    if let Some(d) = initial_data {
-        buffer.extend_from_slice(&d);
-    }
-    
-    let flag_bytes = config.udp_flag.as_bytes();
-    let mut read_buf = [0u8; 4096];
-
-    // 如果缓冲区开头不是 flag，可能是直接的 UDP 包（如果 flag 已经在 http_tunnel 中被部分消耗？）
-    // 但通常 http_tunnel 传递包含 header 的 extra_data
-    // 我们先尝试查找 flag 或 httpUDP，如果找到了，就必须等待直到 \r\n\r\n
-    
-    // 简单的状态机：如果不以 flag 开头，假设没有 header 或 header 已被处理
-    // 但为了鲁棒性，我们检查缓冲区是否以 flag 开头
-    let starts_with_flag = buffer.starts_with(flag_bytes) || buffer.starts_with(b"httpUDP");
-    
-    if starts_with_flag {
-        info!("UDP session starts with flag, waiting for full header...");
-        loop {
-            // 检查是否包含 \r\n\r\n
-            if let Some(pos) = find_subsequence(&buffer, b"\r\n\r\n") {
-                let header_len = pos + 4;
-                info!("Stripped {} bytes header from UDP stream", header_len);
-                buffer.drain(0..header_len);
-                break;
-            }
-            
-            // 如果堆积太多数据还没找到换行，可能是异常，强制中止 header 搜索
-            if buffer.len() > 65536 {
-                error!("UDP header too long, aborting header strip");
-                break; 
-            }
-
-            // 读取更多数据
-            match timeout(std::time::Duration::from_secs(5), client_read.read(&mut read_buf)).await {
-                Ok(Ok(n)) if n > 0 => {
-                    buffer.extend_from_slice(&read_buf[..n]);
-                }
-                _ => {
-                    // 读取失败或超时
-                    error!("Timeout or EOF while waiting for UDP header");
-                    break;
-                }
-            }
-        }
-    } else {
-        // 不以 flag 开头，假设是纯数据
-    }
-
-    // 2. 初始化 UDP 数据 (验证)
-    // 此时 buffer 应该包含 Encrypted Payload
-    // 参考 Go 版本：只有当数据足够时才进行验证，否则允许继续读取
-    let (initial_password_index, initial_data_decrypted) = if !buffer.is_empty() {
-        // UDP 数据包最小长度为 12 字节（IPv4）或 24 字节（IPv6）
-        // 如果数据不足，暂不验证，让后续读取补充完整
-        if buffer.len() < 12 {
-            debug!("Initial data too short ({} bytes), deferring validation", buffer.len());
-            (0, false)
+    // 如果有初始数据，需要先剥离 httpUDP 伪头部
+    let mut initial_data_clean = None;
+    if let Some(data) = initial_data {
+        let header_len = config.udp_flag.len() + 4; // flag + \r\n\r\n
+        if data.len() >= header_len {
+            info!("UDP session starts with flag, waiting for full header...");
+            info!("Stripped {} bytes header from UDP stream", header_len);
+            initial_data_clean = Some(data[header_len..].to_vec());
         } else {
-            match init_udp_data(&mut buffer, &password) {
-                Ok((idx, _offset)) => (idx, true), // offset is data.len()
-                Err(e) => {
-                    error!("Init UDP session failed: {}", e);
-                    return;
-                }
-            }
+             // 这种情况很罕见，但也可能 data 不够长
+             // 简单处理：保留
+             initial_data_clean = Some(data);
         }
-    } else {
-        (0, false)
-    };
+    }
 
-    // 如果初始化解密成功，initial_stream_offset 应该是 buffer.len() ?
-    // 不，`init_udp_data` return `(idx, len)`. But `client_to_server` handles `initial_data` separately.
-    // In `client_to_server`, if `initial_data_decrypted` is true, it assumes data is plaintext.
-    // But `client_to_server` logic for `stream_offset` logic: 
-    // If we pass `initial_stream_offset`, it starts there.
-    // If `initial_data` is decrypted, its length should contribute to offset?
-    // In `client_to_server`:
-    // if `initial_data` is sent, `stream_offset` isn't updated?
-    // `client_to_server` signature was: `fn...(..., initial_stream_offset, ...)`
-    // And logic: `let mut stream_offset = initial_stream_offset;`
-    // If `initial_data` was decrypted in `handle_udp_session`, then effectively we consumed those bytes from the "encryption stream".
-    // So `initial_stream_offset` passed to `client_to_server` should be `0`.
-    // BUT `client_to_server` does NOT use `stream_offset` for `initial_data` if it is already decrypted.
-    // It DOES increment `stream_offset` for loop reads.
-    // So if we processed `N` bytes as initial data, the next read starts at offset `N`.
-    // So `initial_stream_offset` passed to `client_to_server` should be `buffer.len()` if decrypted?
-    // Wait. `client_to_server` logic:
-    // `loop { read n; decrypt(..., stream_offset); stream_offset += n }`
-    // If `initial_data` (len N) was processed before loop. The loop reads start at N.
-    // So yes, `initial_stream_offset` should be `buffer.len()` if buffer was processed.
+    let (client_read, mut client_write) = tokio::io::split(client);
     
-    let initial_stream_offset = if initial_data_decrypted { buffer.len() } else { 0 };
+    let udp_socket_clone = udp_socket.clone();
+    let config_clone = config.clone();
+    let password_clone = password.clone();
+    let password_clone2 = password.clone();
 
-    // 传入剩余的 buffer 作为 initial_data
-    let initial_payload = if buffer.is_empty() { None } else { Some(buffer) };
+    // 启动两个任务：Client->Server 和 Server->Client
     
-    let config2 = config.clone();
-    let password2 = password.clone();
-    let udp_socket2 = udp_socket.clone();
+    let s2c = server_to_client(&mut client_write, &udp_socket, config_clone, password_clone);
+    let c2s = client_to_server(client_read, udp_socket_clone, initial_data_clean, password_clone2);
 
-    // 双向转发
+    // 等待任意一个结束
     tokio::select! {
-        _ = client_to_server(&mut client_read, &udp_socket, initial_payload, initial_password_index, initial_data_decrypted, initial_stream_offset, config, password) => {}
-        _ = server_to_client(&mut client_write, &udp_socket2, config2, password2) => {}
+        res = s2c => {
+            debug!("handle_udp_session: s2c ended {:?}", res);
+        }
+        res = c2s => {
+            debug!("handle_udp_session: c2s ended {:?}", res);
+        }
     }
     
     debug!("handle_udp_session: ended");
+    Ok(())
 }
 
 /// 查找子序列辅助函数
