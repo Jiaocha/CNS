@@ -5,10 +5,14 @@
 pub mod config;
 pub mod crypto;
 pub mod dns;
+pub mod dns_cache;
+pub mod error;
 pub mod http_tunnel;
 pub mod platform;
+pub mod stats;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
 
 pub use config::Config;
+

@@ -1,6 +1,7 @@
 //! TCP 模块 - 处理 TCP 连接转发
 
 use crate::config::Config;
+#[allow(deprecated)]
 use crate::crypto::{decrypt_host, xor_crypt};
 use crate::dns::dns_tcp_over_udp;
 use log::{error, debug, info};
@@ -62,115 +63,59 @@ pub fn get_proxy_host(header: &[u8], proxy_key: &str, password: &[u8]) -> Option
 
 /// 智能清理解密后的主机名
 /// 处理部分正确的解密结果，提取有效的 IP:PORT 格式
-fn smart_clean_host(raw: &str) -> String {
-    // 先尝试提取看起来像 IP:PORT 格式的内容
-    // 策略：收集所有数字段，用常见乱码字符作为分隔符
+fn smart_clean_host(host: &str) -> String {
+    // 粗略清理：直接映射乱码字符
+    let cleaned_chars: String = host.chars().map(|c| {
+        match c {
+            '0'..='9' | 'a'..='z' | 'A'..='Z' | '-' | '_' => c,
+            '.' => '.',
+            ':' => ':',
+            // Noise mapping based on logs
+            ' ' | '\t' => '?', // Ignore spaces
+            '>' | '<' | '&' | '%' | ';' | ')' | '(' | '*' | '=' | '!' | '\"' => '.', 
+            '\'' | '`' => ':', // ' often appears near port separator
+            _ => '?', // Skip unknowns
+        }
+    }).filter(|c| *c != '?').collect();
+
+    // Split by non-alphanumeric (dots, colons)
+    let parts: Vec<&str> = cleaned_chars.split(|c| c == '.' || c == ':').filter(|s| !s.is_empty()).collect();
     
-    let mut numbers: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut colon_after_idx: Option<usize> = None;  // 冒号出现在第几个数字之后
-    
-    for ch in raw.chars() {
-        if ch.is_ascii_digit() {
-            current.push(ch);
-        } else {
-            // 非数字字符
-            if !current.is_empty() {
-                numbers.push(current.clone());
-                current.clear();
-            }
-            // 记录冒号位置（作为端口分隔符的候选）
-            if ch == ':' && colon_after_idx.is_none() {
-                colon_after_idx = Some(numbers.len());
-            }
+    // Attempt to reconstruct IP:Port
+    // Logic: If we have at least 5 parts (4 IP segments + 1 Port), or 4 parts+
+    if parts.len() >= 5 {
+        // Assume last part is Port
+        let port_part = parts[parts.len()-1];
+        let ip_parts = &parts[..parts.len()-1];
+        
+        // Take last 4 parts as IP if we have >4
+        if ip_parts.len() >= 4 {
+             let ip_str = ip_parts[ip_parts.len()-4..].join(".");
+             return format!("{}:{}", ip_str, port_part);
         }
     }
-    // 处理最后一个数字
-    if !current.is_empty() {
-        numbers.push(current);
-    }
     
-    // 尝试构建 IP:PORT
-    // 常见格式:
-    // - 4 个 IP 段 + 端口 (冒号在第 4 个数字后)
-    // - 4 个 IP 段无端口
-    // - 可能有额外的乱码数字
+    // Fallback logic from previous implementation
+    // Try to find 4 numbers
+    let mut numbers: Vec<&str> = Vec::new();
+    for part in &parts {
+        if part.chars().all(|c| c.is_numeric()) {
+            numbers.push(part);
+        }
+    }
     
     if numbers.len() >= 4 {
-        // 尝试找到 4 个有效的 IP 段（0-255）
-        let mut ip_segments: Vec<&str> = Vec::new();
-        let mut port: Option<&str> = None;
-        let mut ip_end_idx = 0;
-        
-        for (i, num) in numbers.iter().enumerate() {
-            if ip_segments.len() < 4 {
-                // 尝试作为 IP 段
-                if let Ok(n) = num.parse::<u16>() {
-                    if n <= 255 {
-                        ip_segments.push(num);
-                        ip_end_idx = i;
-                        continue;
-                    }
-                }
-                // 如果数字太大，可能是端口或乱码
-                if ip_segments.len() == 4 {
-                    // 已经有 4 个 IP 段，这个可能是端口
-                    if let Ok(p) = num.parse::<u16>() {
-                        if p > 0 {
-                            port = Some(num);
-                        }
-                    }
-                    break;
-                }
-            } else {
-                // 已经有 4 个 IP 段，后面的数字可能是端口
-                if let Ok(p) = num.parse::<u16>() {
-                    if p > 0 && p <= 65535 {
-                        port = Some(num);
-                        break;
-                    }
-                }
-            }
-        }
-        
-        if ip_segments.len() == 4 {
-            let ip = ip_segments.join(".");
-            
-            // 如果没找到端口，尝试用冒号后的第一个数字
-            if port.is_none() {
-                if let Some(colon_idx) = colon_after_idx {
-                    if colon_idx >= 4 && colon_idx < numbers.len() {
-                        if let Ok(p) = numbers[colon_idx].parse::<u16>() {
-                            if p > 0 && p <= 65535 {
-                                port = Some(&numbers[colon_idx]);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            match port {
-                Some(p) => return format!("{}:{}", ip, p),
-                None => return format!("{}:80", ip),  // 默认端口 80
-            }
-        }
+        let ip = numbers[..4].join(".");
+        let port = if numbers.len() > 4 {
+             numbers[4]
+        } else {
+             "80"
+        };
+        return format!("{}:{}", ip, port);
     }
     
-    // 如果无法提取完整 IP，尝试部分清理
-    // 至少返回可读的内容
-    let cleaned: String = raw.chars()
-        .map(|c| match c {
-            '>' | '<' | '&' | '%' | ';' | '=' | '!' | '"' | '(' | ')' | '*' | '\'' => '.',
-            _ if c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-' => c,
-            ' ' | '\t' => ' ',
-            _ => '?',
-        })
-        .collect();
-    
-    // 尝试修复多余的点
-    let cleaned = cleaned.replace("..", ".").replace(". ", " ");
-    
-    cleaned
+    // Last resort: return just cleaned string, hoping for the best
+    cleaned_chars.replace(":", ".") // Strip colons if structure not found, risky but better than panic
 }
 
 /// TCP 双向转发（单方向）- 带加密支持

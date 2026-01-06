@@ -162,7 +162,7 @@ pub async fn handle_tunnel(
                 payload_len += n;
 
                 // 检查是否包含完整的 HTTP 头（双换行）
-                if let Some(pos) = find_subsequence(&buffer[..payload_len], b"\r\n\r\n") {
+                if find_subsequence(&buffer[..payload_len], b"\r\n\r\n").is_some() {
                     // 找到了分隔符，pos 是 \r 之前的索引
                     // 头部长度 = pos + 4 (\r\n\r\n)
                     // 剩余数据从 pos + 4 开始
@@ -207,7 +207,7 @@ pub async fn handle_tunnel(
         if let Some(mut extra) = extra_data {
             initial_data.append(&mut extra);
         }
-        handle_udp_session(client, Some(initial_data), config).await;
+        let _ = handle_udp_session(client, Some(initial_data), config).await;
     } else {
         // HTTP 头处理
         
@@ -228,7 +228,7 @@ pub async fn handle_tunnel(
 
         // 检查是否是 UDP 隧道
         if find_subsequence(&header, config.udp_flag.as_bytes()).is_some() {
-            handle_udp_session(client, extra_data, config).await;
+            let _ = handle_udp_session(client, extra_data, config).await;
         } else {
             handle_tcp_session(client, header, extra_data, config, password).await;
         }
@@ -256,7 +256,7 @@ pub async fn handle_tls_tunnel(
                 payload_len += n;
 
                 // 检查是否包含完整的 HTTP 头（双换行）
-                if let Some(pos) = find_subsequence(&buffer[..payload_len], b"\r\n\r\n") {
+                if find_subsequence(&buffer[..payload_len], b"\r\n\r\n").is_some() {
                     break;
                 }
                 
@@ -306,7 +306,7 @@ pub async fn handle_tls_tunnel(
 
         // 检查是否是 UDP 隧道
         if find_subsequence(&header, config.udp_flag.as_bytes()).is_some() {
-            handle_udp_session(tcp_stream, extra_data, config).await;
+            let _ = handle_udp_session(tcp_stream, extra_data, config).await;
         } else {
             handle_tcp_session(tcp_stream, header, extra_data, config, password).await;
         }

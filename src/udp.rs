@@ -1,6 +1,7 @@
 //! UDP 模块 - 处理 UDP over HTTP Tunnel
 
 use crate::config::Config;
+#[allow(deprecated)]
 use crate::crypto::xor_crypt;
 use log::{error, debug, info};
 use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr};
@@ -38,9 +39,9 @@ async fn write_to_server(udp_socket: &Arc<UdpSocket>, data: &[u8]) -> i32 {
 
         // 解析地址
         let addr_type = data[pkg_sub + 5];
-        let mut addr_len = 0;
+        let addr_len;
         let mut ip_addr = None;
-        let mut port = 0;
+        let port;
 
         match addr_type {
             1 => { // IPv4
@@ -54,6 +55,7 @@ async fn write_to_server(udp_socket: &Arc<UdpSocket>, data: &[u8]) -> i32 {
                 );
                 ip_addr = Some(IpAddr::V4(ip));
                 port = (data[pkg_sub + 10] as u16) << 8 | (data[pkg_sub + 11] as u16);
+                debug!("write_to_server: Decrypted IPv4: {}:{}", ip, port);
             },
             3 => { // Domain
                  if pkg_sub + 7 > data_len { break; }
@@ -337,7 +339,7 @@ async fn server_to_client(
 
 /// 处理 UDP 会话
 pub async fn handle_udp_session(
-    mut client: TcpStream,
+    client: TcpStream,
     initial_data: Option<Vec<u8>>,
     config: Arc<Config>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -396,6 +398,7 @@ pub async fn handle_udp_session(
 }
 
 /// 查找子序列辅助函数
+#[allow(dead_code)]
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())

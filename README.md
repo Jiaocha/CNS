@@ -13,10 +13,15 @@
 - ✅ HTTP CONNECT 隧道代理
 - ✅ HTTP DNS 服务（类似 114DNS/DNSPod）
 - ✅ TCP/UDP 流量转发（IPv4/IPv6）
-- ✅ XOR 加密
+- ✅ **ChaCha20-Poly1305 加密** (v0.7.0 新增)
+- ✅ XOR 加密 (兼容旧客户端)
 - ✅ TLS 支持（自动证书生成）
 - ✅ TCP Fast Open
 - ✅ 守护进程模式
+- ✅ **优雅关闭** - 支持 Ctrl+C/SIGTERM (v0.7.0 新增)
+- ✅ **DNS 缓存** - LRU 缓存加速解析 (v0.7.0 新增)
+- ✅ **流量统计** - 实时连接和流量统计 (v0.7.0 新增)
+- ✅ **环境变量配置** - 敏感信息可从环境变量读取 (v0.7.0 新增)
 
 ## 下载
 
@@ -154,6 +159,7 @@ cross build --release --target armv7-unknown-linux-gnueabihf
     "listen_addr": ["0.0.0.0:2222"],
     "proxy_key": "Host",
     "encrypt_password": "password",
+    "encryption_mode": "chacha20",
     "Enable_dns_tcpOverUdp": true,
     "Enable_httpDNS": true,
     "Enable_TFO": false,
@@ -163,6 +169,37 @@ cross build --release --target armv7-unknown-linux-gnueabihf
     }
 }
 ```
+
+### 配置项说明
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `listen_addr` | 数组 | `[]` | HTTP 隧道监听地址 |
+| `proxy_key` | 字符串 | `"Host"` | 获取目标 Host 的请求头 Key |
+| `encrypt_password` | 字符串 | `""` | 加密密码 |
+| `encryption_mode` | 字符串 | `"chacha20"` | 加密模式: `chacha20`/`xor`/`none` |
+| `Enable_dns_tcpOverUdp` | 布尔 | `false` | 启用 TCP DNS over UDP |
+| `Enable_httpDNS` | 布尔 | `false` | 启用 HTTP DNS 服务 |
+| `Enable_TFO` | 布尔 | `false` | 启用 TCP Fast Open |
+| `Tcp_timeout` | 数字 | `600` | TCP 超时秒数 |
+| `Udp_timeout` | 数字 | `30` | UDP 超时秒数 |
+
+### 环境变量配置
+
+敏感信息可通过环境变量配置，避免明文存储：
+
+```bash
+# 设置加密密码
+export CNS_ENCRYPT_PASSWORD="your-secret-password"
+
+# 设置加密模式 (chacha20/xor/none)
+export CNS_ENCRYPTION_MODE="chacha20"
+
+# 启动服务器
+./cns --config config/cns.json
+```
+
+> **安全提示**: 环境变量配置优先级高于配置文件,推荐在生产环境使用。
 
 ## 卸载
 

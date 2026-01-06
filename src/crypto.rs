@@ -1,20 +1,138 @@
-//! 加密模块 - 实现 XOR 加密/解密
+//! 加密模块 - 实现 ChaCha20-Poly1305 和 XOR 加密/解密
+//!
+//! 新版本使用 ChaCha20-Poly1305 AEAD 加密算法，同时保留 XOR 作为兼容模式
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    ChaCha20Poly1305, Nonce,
+};
+use crate::error::CryptoError;
 
-/// XOR 加密/解密
+// ============================================================================
+// ChaCha20-Poly1305 加密 (推荐使用)
+// ============================================================================
+
+/// 使用 ChaCha20-Poly1305 加密数据
+/// 
+/// 密钥会被填充或截断到 32 字节
+/// 返回格式: nonce (12 bytes) + ciphertext + tag (16 bytes)
+pub fn encrypt_chacha20(plaintext: &[u8], password: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    if plaintext.is_empty() {
+        return Err(CryptoError::EmptyData);
+    }
+
+    // 生成 32 字节密钥
+    let key = derive_key_32(password);
+    let cipher = ChaCha20Poly1305::new_from_slice(&key)
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+
+    // 生成随机 nonce (12 bytes)
+    let nonce_bytes = generate_nonce();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    // 加密
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|_| CryptoError::EncryptFailed)?;
+
+    // 返回 nonce + ciphertext
+    let mut result = nonce_bytes.to_vec();
+    result.extend(ciphertext);
+    Ok(result)
+}
+
+/// 使用 ChaCha20-Poly1305 解密数据
+/// 
+/// 输入格式: nonce (12 bytes) + ciphertext + tag (16 bytes)
+pub fn decrypt_chacha20(ciphertext: &[u8], password: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    // 最小长度: 12 (nonce) + 16 (tag) = 28
+    if ciphertext.len() < 28 {
+        return Err(CryptoError::EmptyData);
+    }
+
+    // 生成 32 字节密钥
+    let key = derive_key_32(password);
+    let cipher = ChaCha20Poly1305::new_from_slice(&key)
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+
+    // 分离 nonce 和密文
+    let (nonce_bytes, encrypted) = ciphertext.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    // 解密
+    cipher
+        .decrypt(nonce, encrypted)
+        .map_err(|_| CryptoError::AuthenticationFailed)
+}
+
+/// 使用 ChaCha20 加密 Host 并 Base64 编码
+pub fn encrypt_host_chacha20(host: &[u8], password: &[u8]) -> Result<String, CryptoError> {
+    let encrypted = encrypt_chacha20(host, password)?;
+    Ok(STANDARD.encode(&encrypted))
+}
+
+/// Base64 解码并使用 ChaCha20 解密 Host
+pub fn decrypt_host_chacha20(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let decoded = STANDARD.decode(encoded_host).map_err(|_| CryptoError::Base64Error)?;
+    decrypt_chacha20(&decoded, password)
+}
+
+/// 从密码派生 32 字节密钥 (简单填充/截断方式)
+fn derive_key_32(password: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    if password.is_empty() {
+        return key;
+    }
+    
+    // 循环填充密码到 32 字节
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = password[i % password.len()];
+    }
+    key
+}
+
+/// 生成 12 字节随机 nonce
+fn generate_nonce() -> [u8; 12] {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    
+    let mut nonce = [0u8; 12];
+    
+    // 使用时间戳和进程信息生成伪随机 nonce
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    
+    let nanos = now.as_nanos();
+    let pid = std::process::id();
+    
+    // 混合时间戳和 PID
+    for (i, byte) in nonce.iter_mut().enumerate() {
+        let shift = (i * 8) % 64;
+        *byte = ((nanos >> shift) as u8) ^ ((pid >> (i % 4 * 8)) as u8);
+    }
+    
+    nonce
+}
+
+// ============================================================================
+// XOR 加密 (兼容模式 - 已弃用,仅用于向后兼容)
+// ============================================================================
+
+/// XOR 加密/解密 (已弃用)
 /// 
 /// 对数据进行 XOR 加密，返回新的密码索引
 /// 算法: byte ^= password[pwd_idx] | (data_idx as u8)
-pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, stream_offset: usize) -> usize {
+/// 
+/// # 安全警告
+/// XOR 加密极不安全,请使用 ChaCha20 替代
+#[deprecated(since = "0.6.0", note = "使用 encrypt_chacha20/decrypt_chacha20 替代")]
+pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, _stream_offset: usize) -> usize {
     if password.is_empty() {
         return password_index;
     }
 
-    for (_i, byte) in data.iter_mut().enumerate() {
-        // 使用 password_index 作为掩码 (标准 Go 服务器算法)
-        // 之前尝试使用 data_idx (stream_offset + i) 是为了兼容 clnc 的 host 解密，
-        // 但看来 clnc 的数据流加密可能还是遵循标准算法
+    for byte in data.iter_mut() {
         *byte ^= password[password_index] | (password_index as u8);
         
         password_index += 1;
@@ -26,16 +144,20 @@ pub fn xor_crypt(data: &mut [u8], password: &[u8], mut password_index: usize, st
     password_index
 }
 
-/// 解密 Host
+/// 解密 Host (XOR 兼容模式)
 /// 
 /// Base64 解码后尝试多种 XOR 算法解密
 /// 使用评分系统选择最佳结果
-pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, DecryptError> {
+/// 
+/// # 安全警告
+/// XOR 加密极不安全,请使用 decrypt_host_chacha20 替代
+#[deprecated(since = "0.6.0", note = "使用 decrypt_host_chacha20 替代")]
+pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, CryptoError> {
     // Base64 解码
-    let decoded = STANDARD.decode(encoded_host).map_err(|_| DecryptError::Base64Error)?;
+    let decoded = STANDARD.decode(encoded_host).map_err(|_| CryptoError::Base64Error)?;
 
     if decoded.is_empty() {
-        return Err(DecryptError::EmptyData);
+        return Err(CryptoError::EmptyData);
     }
 
     // 空密码时直接返回解码后的数据
@@ -102,12 +224,12 @@ pub fn decrypt_host(encoded_host: &[u8], password: &[u8]) -> Result<Vec<u8>, Dec
                 Ok(result)
             } else {
                 log::warn!("All decrypt algorithms failed for host: {:02X?}", decoded);
-                Err(DecryptError::DecryptFailed)
+                Err(CryptoError::DecryptFailed)
             }
         }
         None => {
             log::warn!("No decrypt result for host: {:02X?}", decoded);
-            Err(DecryptError::DecryptFailed)
+            Err(CryptoError::DecryptFailed)
         }
     }
 }
@@ -207,9 +329,13 @@ fn score_host_result(data: &[u8]) -> i32 {
     score
 }
 
-/// 加密 Host
+/// 加密 Host (XOR 兼容模式)
 /// 
 /// XOR 加密后进行 Base64 编码
+/// 
+/// # 安全警告
+/// XOR 加密极不安全,请使用 encrypt_host_chacha20 替代
+#[deprecated(since = "0.6.0", note = "使用 encrypt_host_chacha20 替代")]
 pub fn encrypt_host(host: &[u8], password: &[u8]) -> String {
     let mut data = host.to_vec();
     data.push(0); // 添加结尾的 null 字节
@@ -219,31 +345,65 @@ pub fn encrypt_host(host: &[u8], password: &[u8]) -> String {
     STANDARD.encode(&data)
 }
 
-/// 解密错误类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecryptError {
-    Base64Error,
-    EmptyData,
-    DecryptFailed,
-}
-
-impl std::fmt::Display for DecryptError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DecryptError::Base64Error => write!(f, "Base64 decode error"),
-            DecryptError::EmptyData => write!(f, "Empty data"),
-            DecryptError::DecryptFailed => write!(f, "Decrypt failed"),
-        }
-    }
-}
-
-impl std::error::Error for DecryptError {}
+// ============================================================================
+// 测试
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn test_chacha20_encrypt_decrypt() {
+        let password = b"test_password";
+        let plaintext = b"Hello, World!";
+        
+        let encrypted = encrypt_chacha20(plaintext, password).unwrap();
+        let decrypted = decrypt_chacha20(&encrypted, password).unwrap();
+        
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_chacha20_host_encrypt_decrypt() {
+        let password = b"secret_password";
+        let host = b"192.168.1.1:8080";
+        
+        let encrypted = encrypt_host_chacha20(host, password).unwrap();
+        let decrypted = decrypt_host_chacha20(encrypted.as_bytes(), password).unwrap();
+        
+        assert_eq!(decrypted, host);
+    }
+
+    #[test]
+    fn test_chacha20_different_passwords_fail() {
+        let password1 = b"password1";
+        let password2 = b"password2";
+        let plaintext = b"secret data";
+        
+        let encrypted = encrypt_chacha20(plaintext, password1).unwrap();
+        let result = decrypt_chacha20(&encrypted, password2);
+        
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chacha20_tampered_data_fail() {
+        let password = b"test_password";
+        let plaintext = b"Hello, World!";
+        
+        let mut encrypted = encrypt_chacha20(plaintext, password).unwrap();
+        // 篡改数据
+        if let Some(byte) = encrypted.last_mut() {
+            *byte ^= 0xFF;
+        }
+        
+        let result = decrypt_chacha20(&encrypted, password);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[allow(deprecated)]
     fn test_xor_crypt_roundtrip() {
         let password = b"test_password";
         let original = b"Hello, World!";
@@ -262,7 +422,8 @@ mod tests {
     }
 
     #[test]
-    fn test_host_encrypt_decrypt() {
+    #[allow(deprecated)]
+    fn test_xor_host_encrypt_decrypt() {
         let password = b"secret";
         let host = b"example.com:80";
 
@@ -273,10 +434,23 @@ mod tests {
     }
     
     #[test]
+    #[allow(deprecated)]
     fn test_empty_password() {
         let password = b"";
         let host = b"test";
         // 不应该 panic
         let _ = decrypt_host(host, password);
+    }
+
+    #[test]
+    fn test_derive_key() {
+        let short_password = b"abc";
+        let key = derive_key_32(short_password);
+        assert_eq!(key.len(), 32);
+        // 验证循环填充
+        assert_eq!(key[0], b'a');
+        assert_eq!(key[1], b'b');
+        assert_eq!(key[2], b'c');
+        assert_eq!(key[3], b'a');
     }
 }

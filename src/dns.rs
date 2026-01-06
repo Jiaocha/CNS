@@ -1,6 +1,7 @@
 //! DNS 模块 - 处理 DNS 相关功能
 
 use crate::config::Config;
+#[allow(deprecated)]
 use crate::crypto::xor_crypt;
 use log::error;
 use std::sync::Arc;
