@@ -165,6 +165,8 @@ cross build --release --target armv7-unknown-linux-gnueabihf
 
 ## 使用方法
 
+### 直接运行
+
 ```bash
 # 启动服务器
 ./cns --config config/cns.json
@@ -174,6 +176,68 @@ cross build --release --target armv7-unknown-linux-gnueabihf
 
 # 查看帮助
 ./cns --help
+```
+
+### systemd 服务管理 (Linux)
+
+使用 systemd 管理 CNS 服务（推荐生产环境）：
+
+```bash
+# 启动服务
+sudo systemctl start cns
+
+# 停止服务
+sudo systemctl stop cns
+
+# 重启服务
+sudo systemctl restart cns
+
+# 查看服务状态
+sudo systemctl status cns
+
+# 设置开机自启
+sudo systemctl enable cns
+
+# 取消开机自启
+sudo systemctl disable cns
+
+# 查看服务日志（实时）
+sudo journalctl -u cns -f
+
+# 查看最近 100 条日志
+sudo journalctl -u cns -n 100
+
+# 查看日志（从今天开始）
+sudo journalctl -u cns --since today
+
+# 重载 systemd 配置（修改服务文件后）
+sudo systemctl daemon-reload
+```
+
+**服务状态说明**：
+- `active (running)` - 服务正在运行
+- `inactive (dead)` - 服务已停止
+- `failed` - 服务启动失败，请查看日志排查
+
+**查看服务详细信息**：
+```bash
+# 查看服务配置
+sudo systemctl show cns
+
+# 查看服务启动失败原因
+sudo systemctl status cns -l
+```
+
+**修改配置后重启服务**：
+```bash
+# 1. 编辑配置文件
+sudo nano /etc/cns/config.json
+
+# 2. 重启服务使配置生效
+sudo systemctl restart cns
+
+# 3. 验证服务状态
+sudo systemctl status cns
 ```
 
 ## 配置文件
