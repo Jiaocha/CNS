@@ -202,7 +202,7 @@ cross build --release --target armv7-unknown-linux-gnueabihf
 |--------|------|--------|------|
 | `listen_addr` | 数组 | `[]` | HTTP 隧道监听地址 |
 | `proxy_key` | 字符串 | `"Host"` | 获取目标 Host 的请求头 Key |
-| `encrypt_password` | 字符串 | `""` | 加密密码 |
+| `encrypt_password` | 字符串 | `""` | 加密密码（留空则不加密） |
 | `encryption_mode` | 字符串 | `"chacha20"` | 加密模式: `chacha20`/`xor`/`none` |
 | `Enable_dns_tcpOverUdp` | 布尔 | `false` | 启用 TCP DNS over UDP |
 | `Enable_httpDNS` | 布尔 | `false` | 启用 HTTP DNS 服务 |
@@ -226,6 +226,89 @@ export CNS_ENCRYPTION_MODE="chacha20"
 ```
 
 > **安全提示**: 环境变量配置优先级高于配置文件,推荐在生产环境使用。
+
+### proxy_key（代理 Key）说明
+
+`proxy_key` 用于从 HTTP 请求头中获取目标服务器的 Host 地址。
+
+**工作原理**：
+- 客户端连接到 CNS 服务器时，需要在 HTTP 请求头中设置 `proxy_key` 指定的字段
+- 服务器读取该字段的值作为目标地址
+- 例如：`proxy_key: "Meng"`，客户端请求头需包含 `Meng: target.com:80`
+
+**示例**：
+```json
+{
+    "proxy_key": "Meng"
+}
+```
+
+客户端请求示例（使用 curl）：
+```bash
+# 假设 CNS 服务器监听在 2222 端口，proxy_key 为 "Meng"
+curl -x http://127.0.0.1:2222 -H "Meng: www.example.com:80" http://www.example.com
+```
+
+**注意事项**：
+- 默认值为 `"Host"`，此时客户端可以直接访问目标 URL
+- 自定义 `proxy_key` 可以混淆流量，提高隐蔽性
+- 客户端必须使用相同的 `proxy_key` 才能正常连接
+
+### encrypt_password（加密密码）说明
+
+`encrypt_password` 用于加密代理流量，保护数据传输安全。
+
+**设置方式**：
+
+**方式一：配置文件（不推荐生产环境）**
+```json
+{
+    "encrypt_password": "your-secret-password",
+    "encryption_mode": "chacha20"
+}
+```
+
+**方式二：环境变量（推荐）**
+```bash
+# Linux/macOS
+export CNS_ENCRYPT_PASSWORD="your-secret-password"
+export CNS_ENCRYPTION_MODE="chacha20"
+
+# Windows PowerShell
+$env:CNS_ENCRYPT_PASSWORD="your-secret-password"
+$env:CNS_ENCRYPTION_MODE="chacha20"
+
+# 启动服务
+./cns --config config/cns.json
+```
+
+**加密模式对比**：
+
+| 模式 | 安全性 | 性能 | 兼容性 | 推荐场景 |
+|------|--------|------|--------|----------|
+| `chacha20` | ⭐⭐⭐⭐⭐ | 高 | 新客户端 | 生产环境（推荐） |
+| `xor` | ⭐ | 极高 | 旧客户端 | 仅用于兼容旧版本 |
+| `none` | ⭐⭐⭐⭐⭐ | 极高 | 所有客户端 | 内网/测试环境 |
+
+**完整配置示例**：
+```json
+{
+    "listen_addr": ["0.0.0.0:2222"],
+    "proxy_key": "Meng",
+    "encrypt_password": "MySecretPassword123",
+    "encryption_mode": "chacha20",
+    "Enable_httpDNS": true
+}
+```
+
+**客户端配置**：
+客户端需要使用相同的 `encrypt_password` 和 `encryption_mode` 才能解密流量。具体配置方式请参考客户端文档（[mmmdbybyd/CLNC](https://github.com/mmmdbybyd/CLNC)）。
+
+**安全建议**：
+1. 生产环境务必设置强密码（至少 16 位，包含大小写字母、数字、特殊字符）
+2. 优先使用 `chacha20` 加密模式
+3. 不要在配置文件中明文存储密码，使用环境变量
+4. 定期更换密码
 
 ## 卸载
 
