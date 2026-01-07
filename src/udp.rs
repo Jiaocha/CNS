@@ -359,6 +359,7 @@ pub async fn handle_udp_session(
     // 如果有初始数据，需要先剥离 httpUDP 伪头部
     let mut initial_data_clean = None;
     if let Some(data) = initial_data {
+        info!("UDP session initial data len={}: {:02X?}", data.len(), &data[..std::cmp::min(data.len(), 32)]);
         let flag_bytes = config.udp_flag.as_bytes();
         let header_len = flag_bytes.len() + 4; // flag + \r\n\r\n
         
