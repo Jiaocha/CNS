@@ -42,6 +42,8 @@
 
 ### Linux 一键安装
 
+使用一键安装脚本可以自动完成架构检测、配置生成和服务部署。安装过程会交互式询问配置项，也可使用默认配置。
+
 ```bash
 # 下载并安装（自动检测架构）
 curl -fsSL https://raw.githubusercontent.com/Jiaocha/CNS/main/scripts/install.sh | bash
@@ -49,6 +51,30 @@ curl -fsSL https://raw.githubusercontent.com/Jiaocha/CNS/main/scripts/install.sh
 # 或使用 wget
 wget -qO- https://raw.githubusercontent.com/Jiaocha/CNS/main/scripts/install.sh | bash
 ```
+
+#### 安装流程说明
+
+1. **架构检测** - 自动识别系统架构（x86_64/aarch64/armv7l）
+2. **二进制下载** - 从 GitHub Releases 下载对应版本
+3. **交互配置** - 安装过程中会提示输入以下配置项：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| 监听端口 | `2222` | HTTP 隧道监听端口 |
+| 代理 Key | `Meng` | 获取目标 Host 的请求头 Key |
+| 加密密码 | 留空 | 可选设置 ChaCha20-Poly1305 加密 |
+| HTTP DNS | `y` | 是否启用 HTTP DNS 服务 |
+| TLS | `n` | 是否启用 TLS 加密 |
+| TLS 端口 | `443` | TLS 监听端口（启用 TLS 时） |
+| 证书域名 | 留空 | 自动生成证书或自定义域名 |
+| 立即启动 | `y` | 安装完成后启动服务并设置开机自启 |
+
+4. **自动完成事项**：
+   - 安装二进制文件到 `/usr/local/bin/cns`
+   - 创建配置目录 `/etc/cns`
+   - 生成配置文件 `/etc/cns/config.json`
+   - 创建 systemd 服务 `/etc/systemd/system/cns.service`
+   - 可选启动服务并设置开机自启
 
 ### Linux 手动安装
 
