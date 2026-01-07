@@ -30,7 +30,7 @@ async fn write_to_server(udp_socket: &Arc<UdpSocket>, data: &[u8]) -> i32 {
         // 验证保留字段 (Offset 2, 3, 4)
         if pkg_len >= 10 {
              if data[pkg_sub+2] != 0 || data[pkg_sub+3] != 0 || data[pkg_sub+4] != 0 {
-                  debug!("write_to_server: reserved fields check failed, likely decryption error. Skipping packet.");
+                  info!("UDP Error: reserved fields check failed. data[2..5]={:?}, likely decryption error or wrong protocol. PkgLen={}", &data[pkg_sub+2..pkg_sub+5], pkg_len);
                   // 尝试跳过这个包
                   pkg_sub += 2 + pkg_len as usize;
                   continue;
@@ -55,7 +55,7 @@ async fn write_to_server(udp_socket: &Arc<UdpSocket>, data: &[u8]) -> i32 {
                 );
                 ip_addr = Some(IpAddr::V4(ip));
                 port = (data[pkg_sub + 10] as u16) << 8 | (data[pkg_sub + 11] as u16);
-                debug!("write_to_server: Decrypted IPv4: {}:{}", ip, port);
+                info!("UDP Decrypted IPv4: {}:{}", ip, port);
             },
             3 => { // Domain
                  if pkg_sub + 7 > data_len { break; }
