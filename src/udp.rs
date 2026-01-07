@@ -364,15 +364,15 @@ pub async fn handle_udp_session(
         let header_len = flag_bytes.len() + 4; // flag + \r\n\r\n
         
         // 只有当数据确实以 udp_flag 开头时才剥离
-        // 这主要用于非标准 HTTP 头的 UDP 连接（如 raw httpUDP）
-        // 对于通过标准 HTTP 头建立的连接，header 已经被 http_tunnel 剥离，这里的 data 是 payload
+        // 改进：查找 \r\n\r\n 作为头部结束标志，而不是固定长度
         if data.len() >= flag_bytes.len() && &data[..flag_bytes.len()] == flag_bytes {
-            if data.len() >= header_len {
-                info!("UDP session starts with flag, stripped {} bytes header", header_len);
-                initial_data_clean = Some(data[header_len..].to_vec());
+            if let Some(pos) = find_subsequence(&data, b"\r\n\r\n") {
+                let header_end = pos + 4;
+                info!("UDP session starts with flag, stripped {} bytes header (dynamic)", header_end);
+                initial_data_clean = Some(data[header_end..].to_vec());
             } else {
-                // 数据长度不足完整头部，但以前缀开头，可能只是部分头部
-                // 这种情况下我们清空数据等待后续
+                // 找到了 flag 但没找到结束符，可能数据不全，清空等待
+                info!("UDP session starts with flag but no end marker, waiting...");
                 initial_data_clean = Some(Vec::new());
             }
         } else {
