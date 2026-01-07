@@ -359,14 +359,23 @@ pub async fn handle_udp_session(
     // 如果有初始数据，需要先剥离 httpUDP 伪头部
     let mut initial_data_clean = None;
     if let Some(data) = initial_data {
-        let header_len = config.udp_flag.len() + 4; // flag + \r\n\r\n
-        if data.len() >= header_len {
-            info!("UDP session starts with flag, waiting for full header...");
-            info!("Stripped {} bytes header from UDP stream", header_len);
-            initial_data_clean = Some(data[header_len..].to_vec());
+        let flag_bytes = config.udp_flag.as_bytes();
+        let header_len = flag_bytes.len() + 4; // flag + \r\n\r\n
+        
+        // 只有当数据确实以 udp_flag 开头时才剥离
+        // 这主要用于非标准 HTTP 头的 UDP 连接（如 raw httpUDP）
+        // 对于通过标准 HTTP 头建立的连接，header 已经被 http_tunnel 剥离，这里的 data 是 payload
+        if data.len() >= flag_bytes.len() && &data[..flag_bytes.len()] == flag_bytes {
+            if data.len() >= header_len {
+                info!("UDP session starts with flag, stripped {} bytes header", header_len);
+                initial_data_clean = Some(data[header_len..].to_vec());
+            } else {
+                // 数据长度不足完整头部，但以前缀开头，可能只是部分头部
+                // 这种情况下我们清空数据等待后续
+                initial_data_clean = Some(Vec::new());
+            }
         } else {
-             // 这种情况很罕见，但也可能 data 不够长
-             // 简单处理：保留
+             // 不以 flag 开头，认为是 payload 数据
              initial_data_clean = Some(data);
         }
     }
