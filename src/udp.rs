@@ -275,7 +275,7 @@ async fn server_to_client(
             }
         };
 
-        debug!("server_to_client: received {} bytes from {}", n, addr);
+        info!("UDP server_to_client: received {} bytes from {}", n, addr);
 
         // 构造 socks5 头部回包
         // Length (2 bytes) + [0,0,0] (Resv) + 1 (IPv4) + Addr + Port
